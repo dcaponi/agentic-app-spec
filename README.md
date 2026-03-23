@@ -2,8 +2,6 @@
 
 A file-tree based specification for defining AI agent pipelines and multi-agent workflows. Agents and workflows are declared in YAML, system prompts live in Markdown, and a build step generates typed function handles in your target language. Think of it as **protobuf for AI agent orchestration**.
 
-This specification was extracted from a real working SvelteKit project ([ADE-Meal-Analysis-Agents](https://github.com/dominickcaponi/ADE-Meal-Analysis-Agents)) that uses OpenAI agents orchestrated via YAML.
-
 ---
 
 ## Table of Contents
