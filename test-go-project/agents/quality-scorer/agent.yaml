@@ -1,0 +1,15 @@
+name: Quality Scorer
+description: Deterministic scoring of the generated review on structure, completeness, and quality
+type: deterministic
+handler: quality_scoring
+
+input:
+  review_article:
+    type: object
+    required: true
+  review_analysis:
+    type: object
+    required: true
+  comparison_report:
+    type: object
+    required: true

@@ -1,0 +1,16 @@
+{
+  "name": "review_analysis",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "sentiment": { "type": "string", "enum": ["positive", "negative", "mixed"] },
+      "pros": { "type": "array", "items": { "type": "string" } },
+      "cons": { "type": "array", "items": { "type": "string" } },
+      "themes": { "type": "array", "items": { "type": "string" } },
+      "quality_rating": { "type": "number" }
+    },
+    "required": ["sentiment", "pros", "cons", "themes", "quality_rating"],
+    "additionalProperties": false
+  }
+}

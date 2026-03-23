@@ -1,0 +1,25 @@
+name: Review Writer
+description: Writes a comprehensive product review article from analysis data
+type: llm
+model: gpt-4.1
+temperature: 0.4
+input_type: text
+schema: null
+user_message: "Write a comprehensive product review based on the following data.\n\nProduct: {{product_name}} by {{brand}}\nPrice: ${{price}}\n\nReview Analysis:\n{{review_analysis}}\n\nComparison Report:\n{{comparison_report}}\n\nWrite an engaging, balanced review article with sections for Overview, Pros & Cons, How It Compares, and Final Verdict. Return as JSON with fields: title, overview, pros_cons, comparison, verdict, rating (1-10)."
+
+input:
+  product_name:
+    type: string
+    required: true
+  brand:
+    type: string
+    required: true
+  price:
+    type: number
+    required: true
+  review_analysis:
+    type: object
+    required: true
+  comparison_report:
+    type: object
+    required: true

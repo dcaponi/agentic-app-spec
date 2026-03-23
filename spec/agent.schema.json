@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Definition",
+  "description": "Schema for agents/<id>/agent.yaml",
+  "type": "object",
+  "required": ["name", "type"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable agent name"
+    },
+    "description": {
+      "type": "string",
+      "description": "What this agent does"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["llm", "deterministic"],
+      "description": "Execution type"
+    },
+    "model": {
+      "type": "string",
+      "description": "LLM model identifier (e.g., gpt-4.1, gpt-4.1-mini, claude-sonnet-4-5-20241022)"
+    },
+    "temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2,
+      "description": "Sampling temperature"
+    },
+    "input_type": {
+      "type": "string",
+      "enum": ["image", "text"],
+      "default": "text",
+      "description": "Input modality"
+    },
+    "image_detail": {
+      "type": "string",
+      "enum": ["low", "high", "auto"],
+      "default": "auto",
+      "description": "Vision detail level (only for input_type: image)"
+    },
+    "schema": {
+      "type": ["string", "null"],
+      "description": "Registered schema name for structured output, or null for JSON mode"
+    },
+    "user_message": {
+      "type": "string",
+      "description": "User prompt template. Supports {{key}} and {{key.sub}} interpolation."
+    },
+    "handler": {
+      "type": "string",
+      "description": "Deterministic handler function name (type: deterministic only)"
+    },
+    "input": {
+      "type": "object",
+      "description": "Input parameter definitions",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["base64", "string", "number", "boolean", "object"]
+          },
+          "required": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "llm" } } },
+      "then": { "required": ["model"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "deterministic" } } },
+      "then": { "required": ["handler"] }
+    }
+  ]
+}

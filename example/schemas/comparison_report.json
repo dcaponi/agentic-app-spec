@@ -1,0 +1,26 @@
+{
+  "name": "comparison_report",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "alternatives": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "price": { "type": "number" },
+            "pros": { "type": "array", "items": { "type": "string" } },
+            "cons": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["name", "price", "pros", "cons"],
+          "additionalProperties": false
+        }
+      },
+      "recommendation": { "type": "string" }
+    },
+    "required": ["alternatives", "recommendation"],
+    "additionalProperties": false
+  }
+}

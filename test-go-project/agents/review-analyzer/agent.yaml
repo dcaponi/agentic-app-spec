@@ -1,0 +1,25 @@
+name: Review Analyzer
+description: Analyzes product reviews for sentiment, themes, and key insights
+type: llm
+model: gpt-4.1
+temperature: 0.2
+input_type: text
+schema: review_analysis
+user_message: "Analyze the following product data and customer reviews.\n\nProduct: {{product_name}}\nCategory: {{category}}\nPrice: ${{price}}\nRating: {{rating}}/5\n\nReviews:\n{{reviews_text}}\n\nProvide a structured analysis."
+
+input:
+  product_name:
+    type: string
+    required: true
+  category:
+    type: string
+    required: true
+  price:
+    type: number
+    required: true
+  rating:
+    type: number
+    required: true
+  reviews_text:
+    type: string
+    required: true

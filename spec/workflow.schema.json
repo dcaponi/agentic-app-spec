@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Workflow Definition",
+  "description": "Schema for workflows/<name>.yaml",
+  "type": "object",
+  "required": ["name", "version", "steps", "output"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Workflow name (matches filename without .yaml)"
+    },
+    "description": {
+      "type": "string",
+      "description": "What this workflow does"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version (e.g., 1.0)"
+    },
+    "input": {
+      "type": "object",
+      "description": "Workflow-level input parameter definitions",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["base64", "string", "number", "boolean", "object"]
+          },
+          "required": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered list of workflow steps (serial or parallel groups)",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/step" },
+          { "$ref": "#/definitions/parallelGroup" }
+        ]
+      }
+    },
+    "output": {
+      "type": "object",
+      "description": "Output bindings mapping keys to $.path references",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "step": {
+      "type": "object",
+      "required": ["id", "agent", "input"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique step identifier (used in bindings as $.steps.<id>)"
+        },
+        "agent": {
+          "type": "string",
+          "description": "Agent ID (matches folder name in agents/)"
+        },
+        "input": {
+          "type": "object",
+          "description": "Input bindings: maps param names to $.path references or literal values",
+          "additionalProperties": {}
+        },
+        "config": {
+          "type": "object",
+          "description": "Override agent config (model, temperature, etc.) for this step",
+          "properties": {
+            "model": { "type": "string" },
+            "temperature": { "type": "number" }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "description": "Retry configuration",
+          "required": ["max_attempts", "backoff_ms"],
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Total attempts including the first try"
+            },
+            "backoff_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Base delay between retries (multiplied by attempt number)"
+            }
+          }
+        },
+        "fallback": {
+          "type": "object",
+          "description": "Fallback agent if all retries fail",
+          "required": ["agent"],
+          "properties": {
+            "agent": {
+              "type": "string",
+              "description": "Fallback agent ID"
+            },
+            "config": {
+              "type": "object",
+              "description": "Config overrides for the fallback agent"
+            }
+          }
+        },
+        "short_circuit": {
+          "type": "object",
+          "description": "Early exit condition — skips all remaining steps if true",
+          "required": ["condition", "defaults"],
+          "properties": {
+            "condition": {
+              "type": "string",
+              "description": "JavaScript expression with 'output' in scope (e.g., '!output.is_food')"
+            },
+            "defaults": {
+              "type": "object",
+              "description": "Default output values for each subsequent step ID that will be skipped"
+            }
+          }
+        }
+      }
+    },
+    "parallelGroup": {
+      "type": "object",
+      "required": ["parallel"],
+      "properties": {
+        "parallel": {
+          "type": "array",
+          "description": "Steps that execute concurrently",
+          "items": { "$ref": "#/definitions/step" }
+        }
+      }
+    }
+  }
+}

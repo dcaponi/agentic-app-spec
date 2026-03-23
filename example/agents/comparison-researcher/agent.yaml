@@ -1,0 +1,25 @@
+name: Comparison Researcher
+description: Researches and compares the product against similar alternatives
+type: llm
+model: gpt-4.1
+temperature: 0.3
+input_type: text
+schema: comparison_report
+user_message: "Research alternatives to this product and provide a comparison.\n\nProduct: {{product_name}}\nCategory: {{category}}\nPrice: ${{price}}\nBrand: {{brand}}\nDescription: {{description}}\n\nIdentify 2-3 comparable alternatives and compare them."
+
+input:
+  product_name:
+    type: string
+    required: true
+  category:
+    type: string
+    required: true
+  price:
+    type: number
+    required: true
+  brand:
+    type: string
+    required: true
+  description:
+    type: string
+    required: true

@@ -1,0 +1,9 @@
+name: Product Fetcher
+description: Fetches product data and reviews from DummyJSON API
+type: deterministic
+handler: product_fetch
+
+input:
+  product_id:
+    type: number
+    required: true

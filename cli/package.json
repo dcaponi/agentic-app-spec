@@ -1,0 +1,20 @@
+{
+  "name": "agentic",
+  "version": "1.0.0",
+  "description": "CLI for Agentic App Spec — scaffold agents, workflows, and generate typed handles",
+  "type": "module",
+  "bin": { "agentic": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
