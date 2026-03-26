@@ -36,11 +36,21 @@ else
   DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}"
 fi
 
+DEST="${INSTALL_DIR}/agentic${EXT}"
+
 echo "Installing agentic (${OS_NAME}/${ARCH_NAME})..."
 echo "  from: ${DOWNLOAD_URL}"
-echo "  to:   ${INSTALL_DIR}/agentic${EXT}"
+echo "  to:   ${DEST}"
 
-curl -fSL "$DOWNLOAD_URL" -o "${INSTALL_DIR}/agentic${EXT}"
-chmod +x "${INSTALL_DIR}/agentic${EXT}"
+TMPFILE="$(mktemp)"
+curl -fSL "$DOWNLOAD_URL" -o "$TMPFILE"
+chmod +x "$TMPFILE"
+
+if [ -w "$INSTALL_DIR" ]; then
+  mv "$TMPFILE" "$DEST"
+else
+  echo "  (requires sudo to write to ${INSTALL_DIR})"
+  sudo mv "$TMPFILE" "$DEST"
+fi
 
 echo "Done! Run 'agentic --help' to get started."
