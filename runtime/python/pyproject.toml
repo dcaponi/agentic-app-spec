@@ -6,13 +6,19 @@ build-backend = "setuptools.build_meta"
 name = "agentic-engine"
 version = "0.1.0"
 description = "Runtime engine for Agentic App Spec — powers generated stubs from `agentic build --lang python`."
-readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { name = "Dominick Caponi" },
+]
+keywords = ["agentic", "agents", "workflows", "orchestration", "ai", "llm"]
 dependencies = [
     "openai>=1.0.0",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/dominickcaponi/agentic-app-spec"
 
 [project.optional-dependencies]
 dev = [

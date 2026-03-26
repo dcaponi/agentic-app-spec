@@ -1,0 +1,22 @@
+[package]
+name = "agentic"
+version = "1.0.0"
+edition = "2021"
+description = "CLI for Agentic App Spec — scaffold agents, workflows, and generate typed handles"
+license = "MIT"
+repository = "https://github.com/dominickcaponi/agentic-app-spec"
+
+[[bin]]
+name = "agentic"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "z"

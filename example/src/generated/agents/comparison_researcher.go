@@ -1,7 +1,7 @@
 // @generated from agents/comparison-researcher/agent.yaml — do not edit
 package agents
 
-import "agentic/engine"
+import engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
 
 type ComparisonResearcherInput struct {
     ProductName string `json:"product_name"`

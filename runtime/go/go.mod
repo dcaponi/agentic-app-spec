@@ -1,4 +1,4 @@
-module github.com/agentic-app-spec/engine
+module github.com/dominickcaponi/agentic-app-spec/runtime/go
 
 go 1.21
 

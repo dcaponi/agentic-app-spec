@@ -22,7 +22,7 @@ The data flows like this: the fetcher provides raw product data that feeds into 
 
 ## Prerequisites
 
-- **Node.js 20+** installed on your machine
+- The **agentic** CLI installed (download from [releases](https://github.com/dominickcaponi/agentic-app-spec/releases) or build from source with `cd cli && cargo build --release`)
 - An **OpenAI API key** (set as the `OPENAI_API_KEY` environment variable)
 - Basic comfort with the terminal and a text editor
 
@@ -34,7 +34,7 @@ Create a new directory and scaffold the project:
 
 ```bash
 mkdir product-review-app && cd product-review-app
-npx agentic init
+agentic init
 ```
 
 This creates the base directory structure:
@@ -366,7 +366,7 @@ Let's walk through the key sections.
 With all agents and the workflow defined, generate the typed code:
 
 ```bash
-npx agentic build --lang typescript
+agentic build --lang typescript
 ```
 
 This reads every file in `agents/` and `workflows/`, validates them, and writes generated code to `generated/`. After running, you will see:
@@ -612,7 +612,7 @@ Edit `workflows/product-review.yaml` and change the review-writer step's fallbac
         model_override: gpt-4.1-mini
 ```
 
-Change `gpt-4.1-mini` to `gpt-4.1-nano` (or any other model you want to test). Rebuild with `npx agentic build --lang typescript` and run again. Compare the quality scores between different fallback models. Note that you did not touch any TypeScript code -- only the YAML changed.
+Change `gpt-4.1-mini` to `gpt-4.1-nano` (or any other model you want to test). Rebuild with `agentic build --lang typescript` and run again. Compare the quality scores between different fallback models. Note that you did not touch any TypeScript code -- only the YAML changed.
 
 ### Add a sixth agent
 

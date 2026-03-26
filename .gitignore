@@ -1,0 +1,16 @@
+# Rust build artifacts
+cli/target/
+
+# Release binaries (uploaded to GitHub Releases, not committed)
+cli/releases/
+
+# Node modules
+node_modules/
+
+# Python
+__pycache__/
+*.egg-info/
+dist/
+
+# OS
+.DS_Store

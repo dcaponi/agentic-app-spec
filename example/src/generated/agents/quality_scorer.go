@@ -1,7 +1,7 @@
 // @generated from agents/quality-scorer/agent.yaml — do not edit
 package agents
 
-import "agentic/engine"
+import engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
 
 type QualityScorerInput struct {
     ReviewArticle map[string]interface{} `json:"review_article"`

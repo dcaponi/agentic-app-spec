@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	engine "github.com/agentic-app-spec/engine"
+	engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
 )
 
 func main() {

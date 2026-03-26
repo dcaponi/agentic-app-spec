@@ -4,8 +4,58 @@ A file-tree based specification for defining AI agent pipelines and multi-agent 
 
 ---
 
+## Quick Start
+
+### Install the CLI
+
+Download the prebuilt binary for your platform from the [releases](https://github.com/dominickcaponi/agentic-app-spec/releases) page, or build from source:
+
+```bash
+cd cli && cargo build --release
+# binary at cli/target/release/agentic
+```
+
+| Platform       | Binary                         |
+|----------------|--------------------------------|
+| macOS arm64    | `agentic-darwin-arm64`         |
+| macOS x86_64   | `agentic-darwin-x86_64`        |
+| Linux x86_64   | `agentic-linux-x86_64`         |
+| Linux arm64    | `agentic-linux-arm64`          |
+| Windows x86_64 | `agentic-windows-x86_64.exe`   |
+
+### Install the runtime for your language
+
+```bash
+# TypeScript
+npm install agentic-engine
+
+# Python
+pip install "agentic-engine @ git+https://github.com/dominickcaponi/agentic-app-spec.git#subdirectory=runtime/python"
+
+# Go
+go get github.com/dominickcaponi/agentic-app-spec/runtime/go@latest
+```
+
+Ruby — in your Gemfile:
+
+```ruby
+gem "agentic_engine", git: "https://github.com/dominickcaponi/agentic-app-spec.git", glob: "runtime/ruby/*.gemspec"
+```
+
+### Scaffold and build
+
+```bash
+agentic init
+agentic add agent my-agent --type llm
+agentic add workflow my-pipeline --agents my-agent
+agentic build --lang typescript   # or python, ruby, go
+```
+
+---
+
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Agent Definition](#agent-definition)
   - [agent.yaml Reference](#agentyaml-reference)
@@ -1051,7 +1101,7 @@ end
 // @generated from agents/review-analyzer/agent.yaml
 package agents
 
-import "agentic/engine"
+import engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
 
 type ReviewAnalyzerInput struct {
     ProductName string `json:"product_name"`

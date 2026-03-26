@@ -1,7 +1,7 @@
 // @generated from agents/review-analyzer/agent.yaml — do not edit
 package agents
 
-import "agentic/engine"
+import engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
 
 type ReviewAnalyzerInput struct {
     ProductName string `json:"product_name"`

@@ -225,7 +225,7 @@ This consistency pays dividends in three areas:
 
 Agentic App Spec is still early. Here is what is on the roadmap:
 
-**The CLI** (`npx agentic`) is the primary interface. `agentic init` scaffolds a project. `agentic build --lang typescript` generates code. Future commands will include `agentic validate` (check YAML correctness without building) and `agentic run` (execute a workflow from the terminal for testing).
+**The CLI** is distributed as a single binary (no runtime dependencies). `agentic init` scaffolds a project. `agentic build --lang typescript` generates code. Future commands will include `agentic validate` (check YAML correctness without building) and `agentic run` (execute a workflow from the terminal for testing).
 
 **Multi-language support.** TypeScript is the first target. Python, Ruby, and Go generators are planned. The spec itself is language-agnostic; only the code generation layer changes.
 
