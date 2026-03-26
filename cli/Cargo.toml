@@ -1,6 +1,6 @@
 [package]
 name = "agentic"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "CLI for Agentic App Spec — scaffold agents, workflows, and generate typed handles"
 license = "MIT"
