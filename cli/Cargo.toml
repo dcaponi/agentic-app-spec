@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "CLI for Agentic App Spec — scaffold agents, workflows, and generate typed handles"
 license = "MIT"
-repository = "https://github.com/dominickcaponi/agentic-app-spec"
+repository = "https://github.com/dcaponi/agentic-app-spec"
 
 [[bin]]
 name = "agentic"

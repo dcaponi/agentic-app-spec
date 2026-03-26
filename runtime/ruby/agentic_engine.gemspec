@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
   spec.description   = "Executes LLM and deterministic agents defined by the Agentic App Spec. " \
                         "Provides workflow orchestration with parallel execution, retry, fallback, " \
                         "and short-circuit support."
-  spec.homepage      = "https://github.com/dominickcaponi/agentic-app-spec"
+  spec.homepage      = "https://github.com/dcaponi/agentic-app-spec"
   spec.license       = "MIT"
 
   spec.required_ruby_version = ">= 3.1"

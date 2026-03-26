@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/dominickcaponi/agentic-app-spec"
+Repository = "https://github.com/dcaponi/agentic-app-spec"
 
 [project.optional-dependencies]
 dev = [

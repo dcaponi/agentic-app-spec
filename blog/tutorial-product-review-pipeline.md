@@ -22,7 +22,7 @@ The data flows like this: the fetcher provides raw product data that feeds into 
 
 ## Prerequisites
 
-- The **agentic** CLI installed (download from [releases](https://github.com/dominickcaponi/agentic-app-spec/releases) or build from source with `cd cli && cargo build --release`)
+- The **agentic** CLI installed (download from [releases](https://github.com/dcaponi/agentic-app-spec/releases) or build from source with `cd cli && cargo build --release`)
 - An **OpenAI API key** (set as the `OPENAI_API_KEY` environment variable)
 - Basic comfort with the terminal and a text editor
 

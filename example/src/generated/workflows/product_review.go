@@ -1,7 +1,7 @@
 // @generated from workflows/product-review.yaml — do not edit
 package workflows
 
-import engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
+import engine "github.com/dcaponi/agentic-app-spec/runtime/go"
 
 type ProductReviewInput struct {
     ProductId float64 `json:"product_id"`

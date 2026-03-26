@@ -307,7 +307,7 @@ fn gen_go_agent(a: &AgentMeta) -> String {
         "// @generated from {} — do not edit\n\
          package agents\n\
          \n\
-         import engine \"github.com/dominickcaponi/agentic-app-spec/runtime/go\"\n\
+         import engine \"github.com/dcaponi/agentic-app-spec/runtime/go\"\n\
          \n\
          type {}Input struct {{\n\
          {}\n\
@@ -340,7 +340,7 @@ fn gen_go_workflow(w: &WorkflowMeta) -> String {
         "// @generated from {} — do not edit\n\
          package workflows\n\
          \n\
-         import engine \"github.com/dominickcaponi/agentic-app-spec/runtime/go\"\n\
+         import engine \"github.com/dcaponi/agentic-app-spec/runtime/go\"\n\
          \n\
          type {}Input struct {{\n\
          {}\n\

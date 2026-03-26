@@ -9,7 +9,7 @@ A file-tree based specification for defining AI agent pipelines and multi-agent 
 ### Install the CLI
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dominickcaponi/agentic-app-spec/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dcaponi/agentic-app-spec/main/scripts/install.sh | bash
 ```
 
 Or build from source:
@@ -26,16 +26,16 @@ cp target/release/agentic /usr/local/bin/
 npm install agentic-engine
 
 # Python
-pip install "agentic-engine @ git+https://github.com/dominickcaponi/agentic-app-spec.git#subdirectory=runtime/python"
+pip install "agentic-engine @ git+https://github.com/dcaponi/agentic-app-spec.git#subdirectory=runtime/python"
 
 # Go
-go get github.com/dominickcaponi/agentic-app-spec/runtime/go@latest
+go get github.com/dcaponi/agentic-app-spec/runtime/go@latest
 ```
 
 Ruby — in your Gemfile:
 
 ```ruby
-gem "agentic_engine", git: "https://github.com/dominickcaponi/agentic-app-spec.git", glob: "runtime/ruby/*.gemspec"
+gem "agentic_engine", git: "https://github.com/dcaponi/agentic-app-spec.git", glob: "runtime/ruby/*.gemspec"
 ```
 
 ### Scaffold and build
@@ -1097,7 +1097,7 @@ end
 // @generated from agents/review-analyzer/agent.yaml
 package agents
 
-import engine "github.com/dominickcaponi/agentic-app-spec/runtime/go"
+import engine "github.com/dcaponi/agentic-app-spec/runtime/go"
 
 type ReviewAnalyzerInput struct {
     ProductName string `json:"product_name"`

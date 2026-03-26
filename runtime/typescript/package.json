@@ -7,7 +7,7 @@
   "author": "Dominick Caponi",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dominickcaponi/agentic-app-spec.git",
+    "url": "https://github.com/dcaponi/agentic-app-spec.git",
     "directory": "runtime/typescript"
   },
   "keywords": ["agentic", "agents", "workflows", "orchestration", "runtime", "ai", "llm"],

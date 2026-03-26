@@ -14,8 +14,8 @@ Targets:
 The CLI is distributed as prebuilt binaries — see scripts/build-release.sh.
 
 Python and Ruby runtimes are installed directly from GitHub:
-  pip install \"agentic-engine @ git+https://github.com/dominickcaponi/agentic-app-spec.git#subdirectory=runtime/python\"
-  gem \"agentic_engine\", git: \"https://github.com/dominickcaponi/agentic-app-spec.git\", glob: \"runtime/ruby/*.gemspec\"
+  pip install \"agentic-engine @ git+https://github.com/dcaponi/agentic-app-spec.git#subdirectory=runtime/python\"
+  gem \"agentic_engine\", git: \"https://github.com/dcaponi/agentic-app-spec.git\", glob: \"runtime/ruby/*.gemspec\"
 
 Extra args are passed through to npm publish
 (e.g. --dry-run, --tag beta)."

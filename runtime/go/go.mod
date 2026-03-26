@@ -1,4 +1,4 @@
-module github.com/dominickcaponi/agentic-app-spec/runtime/go
+module github.com/dcaponi/agentic-app-spec/runtime/go
 
 go 1.21
 
