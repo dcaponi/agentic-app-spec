@@ -1,12 +1,24 @@
 {
-  "name": "agentic",
+  "name": "agentic-app-spec",
   "version": "1.0.0",
   "description": "CLI for Agentic App Spec — scaffold agents, workflows, and generate typed handles",
   "type": "module",
+  "license": "MIT",
+  "author": "Dominick Caponi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dominickcaponi/agentic-app-spec.git"
+  },
+  "keywords": ["agentic", "agents", "workflows", "cli", "scaffolding", "ai"],
   "bin": { "agentic": "./dist/index.js" },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "commander": "^12.0.0",
