@@ -18,6 +18,25 @@ Here is the pipeline at a glance:
 
 The data flows like this: the fetcher provides raw product data that feeds into the analyzer and researcher (running concurrently). Their outputs feed into the writer. The writer's output feeds into the scorer. If the product is not found, the pipeline short-circuits immediately.
 
+```mermaid
+flowchart TD
+    input["product_id"] --> fetch
+
+    fetch["product-fetcher\n(deterministic)"]
+    fetch -->|"!output.found"| sc["Short-circuit\nreturn defaults"]
+    fetch --> par
+
+    subgraph par ["Parallel"]
+        direction LR
+        review["review-analyzer\n(LLM · gpt-4.1)\nretry 2x → fallback gpt-4.1-mini"]
+        comparison["comparison-researcher\n(LLM · gpt-4.1)\nretry 2x → fallback gpt-4.1-mini"]
+    end
+
+    par --> article["review-writer\n(LLM · gpt-4.1)\nretry 3x → fallback gpt-4.1-mini"]
+    article --> quality["quality-scorer\n(deterministic)"]
+    quality --> output["article · scores\nanalysis · comparisons"]
+```
+
 ---
 
 ## Prerequisites

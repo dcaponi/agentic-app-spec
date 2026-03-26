@@ -6,6 +6,43 @@ What if the orchestration wasn't in your code at all?
 
 This tutorial walks you through building a product review API from scratch. By the end you'll have three HTTP endpoints — a full review pipeline, a streamlined version, and a standalone comparison agent — backed by five agents and two workflows. The Go code registers two handler functions and mounts three routes. Everything else is YAML.
 
+### product-review (full pipeline)
+
+```mermaid
+flowchart TD
+    input["product_id"] --> fetch
+
+    fetch["product-fetcher\n(deterministic)"]
+    fetch -->|"!output.found"| sc["Short-circuit\nreturn defaults"]
+    fetch --> par
+
+    subgraph par ["Parallel"]
+        direction LR
+        review["review-analyzer\n(LLM · gpt-4.1)\nretry 2x → fallback gpt-4.1-mini"]
+        comparison["comparison-researcher\n(LLM · gpt-4.1)\nretry 2x → fallback gpt-4.1-mini"]
+    end
+
+    par --> article["review-writer\n(LLM · gpt-4.1)\nretry 3x → fallback gpt-4.1-mini"]
+    article --> quality["quality-scorer\n(deterministic)"]
+    quality --> output["product · review_analysis\ncomparison · article · quality_scores"]
+```
+
+### quick-review (streamlined)
+
+```mermaid
+flowchart TD
+    input["product_id"] --> fetch
+
+    fetch["product-fetcher\n(deterministic)"]
+    fetch -->|"!output.found"| sc["Short-circuit\nreturn defaults"]
+    fetch --> review
+
+    review["review-analyzer\n(LLM · gpt-4.1)\nretry 2x → fallback gpt-4.1-mini"]
+    review --> article["review-writer\n(LLM · gpt-4.1)\nretry 3x → fallback gpt-4.1-mini"]
+    article --> quality["quality-scorer\n(deterministic)"]
+    quality --> output["product · review_analysis\narticle · quality_scores"]
+```
+
 ## Prerequisites
 
 - Go 1.21+
