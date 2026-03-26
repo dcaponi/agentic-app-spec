@@ -1,10 +1,11 @@
 use std::fs;
 
-use crate::utils::{dump_yaml, find_project_root, to_pascal_case};
+use crate::utils::{dump_yaml, find_project_root, to_pascal_case, to_snake_case};
 
 fn build_llm_agent_yaml(id: &str, model: &str, input_type: &str) -> serde_yaml::Value {
     let mut m = serde_yaml::Mapping::new();
     m.insert(y_str("name"), y_str(&to_pascal_case(id)));
+    m.insert(y_str("description"), y_str(&format!("TODO: describe the {} agent", to_pascal_case(id))));
     m.insert(y_str("type"), y_str("llm"));
     m.insert(y_str("model"), y_str(model));
     m.insert(
@@ -37,8 +38,9 @@ fn build_llm_agent_yaml(id: &str, model: &str, input_type: &str) -> serde_yaml::
 fn build_deterministic_agent_yaml(id: &str) -> serde_yaml::Value {
     let mut m = serde_yaml::Mapping::new();
     m.insert(y_str("name"), y_str(&to_pascal_case(id)));
+    m.insert(y_str("description"), y_str(&format!("TODO: describe the {} agent", to_pascal_case(id))));
     m.insert(y_str("type"), y_str("deterministic"));
-    m.insert(y_str("handler"), y_str(&format!("handlers/{}.ts", id)));
+    m.insert(y_str("handler"), y_str(&to_snake_case(id)));
 
     let mut data_field = serde_yaml::Mapping::new();
     data_field.insert(y_str("type"), y_str("string"));

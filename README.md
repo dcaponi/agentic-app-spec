@@ -47,6 +47,8 @@ agentic add workflow my-pipeline --agents my-agent
 agentic build --lang typescript   # or python, ruby, go
 ```
 
+For a complete walkthrough building a real project from scratch, see [Building a Go API with Agentic App Spec](blog/building-a-go-api-with-agentic-app-spec.md). The same pattern applies to all supported languages.
+
 ---
 
 ## Table of Contents

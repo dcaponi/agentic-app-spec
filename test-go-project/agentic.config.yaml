@@ -1,14 +1,2 @@
-# Agentic App Spec — Project Configuration
-# This file marks the project root and configures the build step.
-
-# Target language for code generation
-lang: typescript
-
-# Output directory for generated handles (relative to project root)
+lang: go
 outdir: src/generated
-
-# Agents directory (relative to project root)
-agents_dir: agents
-
-# Workflows directory (relative to project root)
-workflows_dir: workflows

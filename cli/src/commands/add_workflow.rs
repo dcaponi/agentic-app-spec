@@ -1,26 +1,40 @@
 use std::fs;
 
-use crate::utils::{dump_yaml, find_project_root, to_snake_case};
+use crate::utils::{dump_yaml, find_project_root, load_yaml, to_snake_case};
 
-fn build_step(agent_id: &str) -> serde_yaml::Value {
+fn is_deterministic_agent(root: &std::path::Path, agent_id: &str) -> bool {
+    let yaml_path = root.join("agents").join(agent_id).join("agent.yaml");
+    if !yaml_path.exists() {
+        return false;
+    }
+    let data = load_yaml(&yaml_path);
+    data.get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "deterministic")
+        .unwrap_or(false)
+}
+
+fn build_step(agent_id: &str, deterministic: bool) -> serde_yaml::Value {
     let mut m = serde_yaml::Mapping::new();
-    m.insert(y_str("id"), y_str(&format!("{}_step", to_snake_case(agent_id))));
+    m.insert(y_str("id"), y_str(&to_snake_case(agent_id)));
     m.insert(y_str("agent"), y_str(agent_id));
 
     let mut input = serde_yaml::Mapping::new();
     input.insert(y_str("data"), y_str("$.input.data"));
     m.insert(y_str("input"), serde_yaml::Value::Mapping(input));
 
-    let mut retry = serde_yaml::Mapping::new();
-    retry.insert(
-        y_str("max_attempts"),
-        serde_yaml::Value::Number(serde_yaml::Number::from(2_u64)),
-    );
-    retry.insert(
-        y_str("backoff_ms"),
-        serde_yaml::Value::Number(serde_yaml::Number::from(500_u64)),
-    );
-    m.insert(y_str("retry"), serde_yaml::Value::Mapping(retry));
+    if !deterministic {
+        let mut retry = serde_yaml::Mapping::new();
+        retry.insert(
+            y_str("max_attempts"),
+            serde_yaml::Value::Number(serde_yaml::Number::from(2_u64)),
+        );
+        retry.insert(
+            y_str("backoff_ms"),
+            serde_yaml::Value::Number(serde_yaml::Number::from(500_u64)),
+        );
+        m.insert(y_str("retry"), serde_yaml::Value::Mapping(retry));
+    }
 
     serde_yaml::Value::Mapping(m)
 }
@@ -50,9 +64,15 @@ pub fn run(name: &str, agents: Option<&str>) {
     };
 
     let steps: Vec<serde_yaml::Value> = if agent_ids.is_empty() {
-        vec![build_step("placeholder-agent")]
+        vec![build_step("placeholder-agent", false)]
     } else {
-        agent_ids.iter().map(|id| build_step(id)).collect()
+        agent_ids
+            .iter()
+            .map(|id| {
+                let det = is_deterministic_agent(&root, id);
+                build_step(id, det)
+            })
+            .collect()
     };
 
     // Build output mapping from steps
@@ -68,7 +88,17 @@ pub fn run(name: &str, agents: Option<&str>) {
 
     let mut workflow = serde_yaml::Mapping::new();
     workflow.insert(y_str("name"), y_str(name));
-    workflow.insert(y_str("version"), y_str("1.0.0"));
+    workflow.insert(y_str("description"), y_str(&format!("TODO: describe the {} workflow", name)));
+    workflow.insert(y_str("version"), y_str("1.0"));
+
+    // Add a placeholder input block
+    let mut input_field = serde_yaml::Mapping::new();
+    let mut data_field = serde_yaml::Mapping::new();
+    data_field.insert(y_str("type"), y_str("string"));
+    data_field.insert(y_str("required"), serde_yaml::Value::Bool(true));
+    input_field.insert(y_str("data"), serde_yaml::Value::Mapping(data_field));
+    workflow.insert(y_str("input"), serde_yaml::Value::Mapping(input_field));
+
     workflow.insert(
         y_str("steps"),
         serde_yaml::Value::Sequence(steps),
