@@ -22,7 +22,7 @@ The common thread is that agent identity (what is this agent?), agent behavior (
 
 ## The Inspiration
 
-The main inspirationfor this idea came from gRPC and Protocol Buffers. In the gRPC world, you write a `.proto` file that declares your service contract -- the methods, the request types, the response types. Then `protoc` reads that declaration and generates typed client and server stubs in your target language. Your application code never parses `.proto` files at runtime. It just calls the generated functions, with full type safety and IDE support.
+The main inspiration for this idea came from gRPC and Protocol Buffers. In the gRPC world, you write a `.proto` file that declares your service contract -- the methods, the request types, the response types. Then `protoc` reads that declaration and generates typed client and server stubs in your target language. Your application code never parses `.proto` files at runtime. It just calls the generated functions, with full type safety and IDE support.
 
 Agentic App Spec combines these: file-tree agent definitions (the "what") plus declarative workflow orchestration (the "how") plus code generation (the "bridge to your app").
 
@@ -48,83 +48,106 @@ agents/
 A typical `agent.yaml` for an LLM agent looks like this:
 
 ```yaml
-id: review-analyzer
 name: Review Analyzer
+description: Analyzes product reviews for sentiment, themes, and key insights
 type: llm
 model: gpt-4.1
 temperature: 0.3
-input:
-  product_name: string
-  reviews: "array<object>"
-output_schema: ./schemas/review-analysis.json
-system_message: prompt.md
+schema: review_analysis
 user_message: |
   Analyze the reviews for "{{product_name}}".
-  Reviews: {{reviews}}
+  Reviews: {{reviews_text}}
+
+input:
+  product_name:
+    type: string
+    required: true
+  reviews_text:
+    type: string
+    required: true
 ```
+
+The system prompt lives in `prompt.md` alongside the YAML — it is loaded automatically by the runtime. The `schema` field references a JSON schema file in the `schemas/` directory by name.
 
 A deterministic agent (one that runs code, not an LLM) omits the model and prompt fields and declares a handler:
 
 ```yaml
-id: product-fetcher
 name: Product Fetcher
+description: Fetches product data and reviews from DummyJSON API
 type: deterministic
 handler: product_fetch
+
 input:
-  product_id: number
+  product_id:
+    type: number
+    required: true
 ```
+
+The `handler` field is the name you register in your application code (e.g., `engine.RegisterHandler("product_fetch", myFunc)` in Go).
 
 **2. Workflows as YAML orchestration.** A workflow file at `workflows/<name>.yaml` composes agents into a pipeline. It declares the input the workflow accepts, the steps to execute (in order, in parallel, or both), and the output to return. Critically, it also declares the resilience policy for each step: retries, fallbacks, and short-circuit conditions.
 
 ```yaml
 name: product-review
+version: "1.0"
+
 input:
-  product_id: number
+  product_id:
+    type: number
+    required: true
 
 steps:
   - id: fetch
     agent: product-fetcher
     input:
-      product_id: "$.input.product_id"
+      product_id: $.input.product_id
     short_circuit:
-      condition: "$.steps.fetch.output == null"
-      message: "Product not found"
+      condition: "!output.found"
+      defaults:
+        article: { title: "Product Not Found" }
 
   - parallel:
-      - id: analyze
+    - id: analyze
+      agent: review-analyzer
+      input:
+        product_name: $.steps.fetch.output.title
+        reviews_text: $.steps.fetch.output.reviews_text
+      retry:
+        max_attempts: 2
+        backoff_ms: 500
+      fallback:
         agent: review-analyzer
-        input:
-          product_name: "$.steps.fetch.output.title"
-          reviews: "$.steps.fetch.output.reviews"
-        retry:
-          max_attempts: 2
-      - id: research
-        agent: comparison-researcher
-        input:
-          product_name: "$.steps.fetch.output.title"
-          category: "$.steps.fetch.output.category"
+        config:
+          model: gpt-4.1-mini
+    - id: research
+      agent: comparison-researcher
+      input:
+        product_name: $.steps.fetch.output.title
+        category: $.steps.fetch.output.category
 
   - id: write
     agent: review-writer
     input:
-      product_name: "$.steps.fetch.output.title"
-      analysis: "$.steps.analyze.output"
-      alternatives: "$.steps.research.output"
+      product_name: $.steps.fetch.output.title
+      analysis: $.steps.analyze.output
+      alternatives: $.steps.research.output
     retry:
       max_attempts: 2
-      fallback:
-        agent: review-writer
-        model_override: gpt-4.1-mini
+      backoff_ms: 1000
+    fallback:
+      agent: review-writer
+      config:
+        model: gpt-4.1-mini
 
   - id: score
     agent: quality-scorer
     input:
-      article: "$.steps.write.output"
+      article: $.steps.write.output
 
 output:
-  article: "$.steps.write.output"
-  scores: "$.steps.score.output"
-  analysis: "$.steps.analyze.output"
+  article: $.steps.write.output
+  scores: $.steps.score.output
+  analysis: $.steps.analyze.output
 ```
 
 **3. Code generation.** A CLI tool reads the agent and workflow definitions and generates typed function handles for your target language. In TypeScript, you get something like:
@@ -223,16 +246,28 @@ This consistency pays dividends in three areas:
 
 ## What's Next
 
-Agentic App Spec is still early. Here is what is on the roadmap:
+Agentic App Spec is still early. Here is what exists today and what is on the roadmap:
 
-**The CLI** is distributed as a single binary (no runtime dependencies). `agentic init` scaffolds a project. `agentic build --lang typescript` generates code. Future commands will include `agentic validate` (check YAML correctness without building) and `agentic run` (execute a workflow from the terminal for testing).
+**The CLI** is a standalone Rust binary with no runtime dependencies. `agentic init` scaffolds a project. `agentic add agent` and `agentic add workflow` generate starter YAML. `agentic build --lang go` (or `typescript`, `python`, `ruby`) generates typed code. `agentic list` shows you everything at a glance. Future commands will include `agentic validate` (check YAML correctness without building) and `agentic run` (execute a workflow from the terminal for testing).
 
-**Multi-language support.** TypeScript is the first target. Python, Ruby, and Go generators are planned. The spec itself is language-agnostic; only the code generation layer changes.
+**Multi-language support.** Code generation and runtime engines ship today for TypeScript, Python, Go, and Ruby. The TypeScript runtime is on npm (`agentic-engine`). The Go runtime is a standard Go module. Python and Ruby install directly from the GitHub repo. The spec itself is language-agnostic; only the code generation and runtime layers change.
 
 **AI-readable definitions.** One of the more exciting possibilities is that the spec's declarative, file-tree structure makes it straightforward for AI assistants to scaffold new agents, modify workflows, and reason about pipeline structure. The vision is a development loop where you describe what you want, an AI writes the YAML and prompts, the CLI generates the code, and you run it. Editing the pipeline means editing the YAML, not refactoring application code.
 
 **Community schemas.** As patterns emerge (e.g., "fetch-analyze-generate" pipelines, "fan-out-fan-in" workflows), we want to collect and share reusable workflow templates and agent definitions.
 
-If you want to see it in action, the companion tutorial walks through building a complete product review pipeline from scratch -- five agents, parallel execution, retry with fallback, and short-circuit logic, all defined in YAML and generated into typed TypeScript.
+---
 
-The specification, CLI, and example project are all open source. Contributions, feedback, and questions are welcome.
+## Get Started
+
+The CLI installs in one line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dcaponi/agentic-app-spec/main/scripts/install.sh | bash
+```
+
+To add Agentic App Spec to an existing project, run `agentic init` in your project root. This creates the `agents/`, `workflows/`, and `schemas/` directories alongside your existing code — it doesn't restructure anything. From there, `agentic add agent <name> --type llm` scaffolds an agent, and `agentic add workflow <name> --agents agent-a,agent-b` scaffolds a workflow that wires them together. You customize the generated YAML and prompts to match your domain, then run `agentic build` to generate typed function handles you import into your application. The spec lives next to your code, not instead of it — your existing handlers, routes, and business logic stay exactly where they are. The generated functions just give you a typed, declarative way to call agents and orchestrate workflows instead of stringing together raw API calls.
+
+For a complete walkthrough building a real project from scratch, see the [Go tutorial](building-a-go-api-with-agentic-app-spec.md) — five agents, parallel execution, retry with fallback, and short-circuit logic, all defined in YAML and wired into a Go API. The same pattern applies to TypeScript, Python, and Ruby.
+
+The specification, CLI, runtime engines, and example project are all on GitHub at [dcaponi/agentic-app-spec](https://github.com/dcaponi/agentic-app-spec). Contributions, feedback, and questions are welcome.
