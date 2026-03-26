@@ -8,20 +8,16 @@ A file-tree based specification for defining AI agent pipelines and multi-agent 
 
 ### Install the CLI
 
-Download the prebuilt binary for your platform from the [releases](https://github.com/dominickcaponi/agentic-app-spec/releases) page, or build from source:
+```bash
+curl -fsSL https://raw.githubusercontent.com/dominickcaponi/agentic-app-spec/main/scripts/install.sh | bash
+```
+
+Or build from source:
 
 ```bash
 cd cli && cargo build --release
-# binary at cli/target/release/agentic
+cp target/release/agentic /usr/local/bin/
 ```
-
-| Platform       | Binary                         |
-|----------------|--------------------------------|
-| macOS arm64    | `agentic-darwin-arm64`         |
-| macOS x86_64   | `agentic-darwin-x86_64`        |
-| Linux x86_64   | `agentic-linux-x86_64`         |
-| Linux arm64    | `agentic-linux-arm64`          |
-| Windows x86_64 | `agentic-windows-x86_64.exe`   |
 
 ### Install the runtime for your language
 
