@@ -74,7 +74,7 @@ export async function executeAgent(
 			);
 		}
 		try {
-			const result = handler(input);
+			const result = await handler(input);
 			log.info(`Deterministic agent complete: ${agentDef.name}`, {
 				latency_ms: Math.round(result.metrics.latency_ms),
 			});

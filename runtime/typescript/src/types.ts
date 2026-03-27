@@ -116,7 +116,7 @@ export interface ExecutionContext {
 // ── Handler & schema registry types ──
 
 /** A deterministic handler function registered by the user. */
-export type DeterministicHandler = (input: Record<string, unknown>) => AgentResult;
+export type DeterministicHandler = (input: Record<string, unknown>) => AgentResult | Promise<AgentResult>;
 
 /** A JSON Schema object (for non-Zod runtimes). */
 export interface JsonSchemaObject {
