@@ -1,6 +1,6 @@
 {
   "name": "agentic-app-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Runtime engine for agentic workflows — agent/workflow orchestration with retry, fallback, parallel execution, and short-circuit support.",
   "type": "module",
   "license": "MIT",
@@ -10,7 +10,15 @@
     "url": "https://github.com/dcaponi/agentic-app-spec.git",
     "directory": "runtime/typescript"
   },
-  "keywords": ["agentic", "agents", "workflows", "orchestration", "runtime", "ai", "llm"],
+  "keywords": [
+    "agentic",
+    "agents",
+    "workflows",
+    "orchestration",
+    "runtime",
+    "ai",
+    "llm"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
