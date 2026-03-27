@@ -101,6 +101,7 @@ def load_agent(agent_id: str) -> AgentDefinition:
         name=raw.get("name", ""),
         description=raw.get("description", ""),
         type=raw.get("type", ""),
+        provider=raw.get("provider", ""),
         model=raw.get("model", ""),
         temperature=float(raw.get("temperature", 0.0)),
         input_type=raw.get("input_type", "text"),

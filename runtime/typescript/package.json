@@ -1,5 +1,5 @@
 {
-  "name": "agentic-engine",
+  "name": "agentic-app-engine",
   "version": "0.1.0",
   "description": "Runtime engine for agentic workflows — agent/workflow orchestration with retry, fallback, parallel execution, and short-circuit support.",
   "type": "module",
@@ -29,6 +29,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
     "openai": "^4.78.0",
     "yaml": "^2.7.0",
     "zod": "^3.24.0"

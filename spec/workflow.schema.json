@@ -75,6 +75,7 @@
           "type": "object",
           "description": "Override agent config (model, temperature, etc.) for this step",
           "properties": {
+            "provider": { "type": "string", "enum": ["openai", "anthropic"] },
             "model": { "type": "string" },
             "temperature": { "type": "number" }
           }

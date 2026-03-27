@@ -70,6 +70,7 @@ module AgenticEngine
           name:         raw["name"],
           description:  raw["description"],
           type:         raw["type"],
+          provider:     raw["provider"],
           model:        raw["model"],
           temperature:  raw["temperature"],
           input_type:   raw["input_type"] || "text",

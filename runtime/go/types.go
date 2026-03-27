@@ -43,6 +43,7 @@ type AgentDefinition struct {
 	Name        string                   `yaml:"name" json:"name"`
 	Description string                   `yaml:"description" json:"description"`
 	Type        string                   `yaml:"type" json:"type"` // "llm" or "deterministic"
+	Provider    string                   `yaml:"provider" json:"provider"` // "openai" or "anthropic"; auto-detected from model if empty
 	Model       string                   `yaml:"model" json:"model"`
 	Temperature float64                  `yaml:"temperature" json:"temperature"`
 	InputType   string                   `yaml:"input_type" json:"input_type"`

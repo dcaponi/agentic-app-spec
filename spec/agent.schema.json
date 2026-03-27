@@ -18,6 +18,11 @@
       "enum": ["llm", "deterministic"],
       "description": "Execution type"
     },
+    "provider": {
+      "type": "string",
+      "enum": ["openai", "anthropic"],
+      "description": "LLM provider. If omitted, auto-detected from model name (claude-* → anthropic, otherwise openai)."
+    },
     "model": {
       "type": "string",
       "description": "LLM model identifier (e.g., gpt-4.1, gpt-4.1-mini, claude-sonnet-4-5-20241022)"

@@ -56,6 +56,7 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	type: 'llm' | 'deterministic';
+	provider?: 'openai' | 'anthropic';
 	model?: string;
 	temperature?: number;
 	input_type?: 'image' | 'text';

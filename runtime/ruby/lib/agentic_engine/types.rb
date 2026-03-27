@@ -84,6 +84,7 @@ module AgenticEngine
     :name,
     :description,
     :type,           # "llm" | "deterministic"
+    :provider,       # "openai" | "anthropic" (auto-detected from model if nil)
     :model,
     :temperature,
     :input_type,     # "image" | "text"

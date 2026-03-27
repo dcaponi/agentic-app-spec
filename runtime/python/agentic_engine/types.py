@@ -69,6 +69,7 @@ class AgentDefinition:
     name: str = ""
     description: str = ""
     type: str = ""  # "llm" or "deterministic"
+    provider: str = ""  # "openai" or "anthropic"; auto-detected from model if empty
     model: str = ""
     temperature: float = 0.0
     input_type: str = "text"
