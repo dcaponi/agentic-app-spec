@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,7 @@ var (
 	agentCache    = map[string]*AgentDefinition{}
 	workflowCache = map[string]*WorkflowDefinition{}
 	schemaCache   = map[string]map[string]interface{}{}
+	routerCache   = map[string]*RouterDefinition{}
 	log           = NewLogger("loader")
 )
 
@@ -98,6 +100,40 @@ func LoadAllAgents() (map[string]*AgentDefinition, error) {
 	return result, nil
 }
 
+// LoadRouter reads routers/<id>/router.yaml and its optional prompt.md.
+func LoadRouter(routerID string) (*RouterDefinition, error) {
+	if cached, ok := routerCache[routerID]; ok {
+		return cached, nil
+	}
+
+	root := FindProjectRoot()
+	routerDir := filepath.Join(root, "routers", routerID)
+	if _, err := os.Stat(routerDir); err != nil {
+		return nil, fmt.Errorf("router directory not found: %s", routerDir)
+	}
+	yamlPath := filepath.Join(routerDir, "router.yaml")
+
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read router %s: %w", routerID, err)
+	}
+
+	var def RouterDefinition
+	if err := yaml.Unmarshal(data, &def); err != nil {
+		return nil, fmt.Errorf("failed to parse router %s YAML: %w", routerID, err)
+	}
+
+	// Load prompt.md if it exists
+	promptPath := filepath.Join(routerDir, "prompt.md")
+	if promptData, err := os.ReadFile(promptPath); err == nil {
+		def.Prompt = strings.TrimSpace(string(promptData))
+	}
+
+	routerCache[routerID] = &def
+	log.Debug("loaded router", map[string]interface{}{"router": routerID})
+	return &def, nil
+}
+
 // LoadWorkflow reads workflows/<name>.yaml.
 func LoadWorkflow(name string) (*WorkflowDefinition, error) {
 	if cached, ok := workflowCache[name]; ok {
@@ -148,11 +184,14 @@ func parseWorkflowYAML(data []byte) (*WorkflowDefinition, error) {
 
 	for i, node := range raw.Steps {
 		isParallel := false
+		isRoute := false
 		if node.Kind == yaml.MappingNode {
 			for j := 0; j < len(node.Content)-1; j += 2 {
-				if node.Content[j].Value == "parallel" {
+				switch node.Content[j].Value {
+				case "parallel":
 					isParallel = true
-					break
+				case "route":
+					isRoute = true
 				}
 			}
 		}
@@ -163,6 +202,15 @@ func parseWorkflowYAML(data []byte) (*WorkflowDefinition, error) {
 				return nil, fmt.Errorf("step %d: failed to decode parallel group: %w", i, err)
 			}
 			def.Steps = append(def.Steps, &pg)
+		} else if isRoute {
+			// The YAML has a top-level "route:" key whose value is the RouteBlock
+			var wrapper struct {
+				Route RouteBlock `yaml:"route"`
+			}
+			if err := node.Decode(&wrapper); err != nil {
+				return nil, fmt.Errorf("step %d: failed to decode route block: %w", i, err)
+			}
+			def.Steps = append(def.Steps, &wrapper.Route)
 		} else {
 			var ws WorkflowStep
 			if err := node.Decode(&ws); err != nil {
