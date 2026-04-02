@@ -41,7 +41,8 @@
       "items": {
         "oneOf": [
           { "$ref": "#/definitions/step" },
-          { "$ref": "#/definitions/parallelGroup" }
+          { "$ref": "#/definitions/parallelGroup" },
+          { "$ref": "#/definitions/routeBlock" }
         ]
       }
     },
@@ -137,6 +138,68 @@
           "type": "array",
           "description": "Steps that execute concurrently",
           "items": { "$ref": "#/definitions/step" }
+        }
+      }
+    },
+    "routeBlock": {
+      "type": "object",
+      "required": ["route"],
+      "properties": {
+        "route": {
+          "type": "object",
+          "required": ["id", "router", "input", "routes"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Unique step identifier (used in bindings as $.steps.<id>)"
+            },
+            "router": {
+              "type": "string",
+              "description": "Router ID (matches folder name in routers/)"
+            },
+            "input": {
+              "type": "object",
+              "description": "Input bindings: maps param names to $.path references or literal values",
+              "additionalProperties": {}
+            },
+            "routes": {
+              "type": "object",
+              "description": "Map of route keys to targets. Values can be: a string (agent ID with pass-through input), an object with 'agent' key, an object with 'workflow' key, an object with 'route' key (nested routing), or a _none bail-out with short_circuit+defaults.",
+              "additionalProperties": {}
+            },
+            "retry": {
+              "type": "object",
+              "description": "Retry configuration for the router decision (not the routed target)",
+              "required": ["max_attempts", "backoff_ms"],
+              "properties": {
+                "max_attempts": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Total attempts including the first try"
+                },
+                "backoff_ms": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Base delay between retries (multiplied by attempt number)"
+                }
+              }
+            },
+            "fallback": {
+              "type": "object",
+              "description": "Fallback router if all retries on the primary router fail",
+              "required": ["router"],
+              "properties": {
+                "router": {
+                  "type": "string",
+                  "description": "Fallback router ID"
+                },
+                "config": {
+                  "type": "object",
+                  "description": "Config overrides for the fallback router"
+                }
+              }
+            }
+          }
         }
       }
     }
