@@ -9,7 +9,7 @@ export interface StepMetrics {
 export interface StepResult {
 	id: string;
 	agent: string;
-	status: 'success' | 'skipped' | 'error';
+	status: 'success' | 'skipped' | 'error' | 'short_circuited';
 	output: unknown;
 	metrics: StepMetrics;
 	attempts?: number;
@@ -68,6 +68,18 @@ export interface AgentDefinition {
 	input?: Record<string, { type: string; required?: boolean }>;
 }
 
+export interface RouterDefinition {
+	name: string;
+	description: string;
+	strategy: 'llm' | 'deterministic';
+	provider?: 'openai' | 'anthropic';
+	model?: string;
+	temperature?: number;
+	handler?: string;
+	prompt?: string;
+	input?: Record<string, { type: string; required?: boolean }>;
+}
+
 export interface RetryConfig {
 	max_attempts: number;
 	backoff_ms: number;
@@ -97,7 +109,41 @@ export interface ParallelGroup {
 	parallel: WorkflowStep[];
 }
 
-export type WorkflowEntry = WorkflowStep | ParallelGroup;
+export interface RouteTargetAgent {
+	agent: string;
+	input?: Record<string, string>;
+}
+
+export interface RouteTargetWorkflow {
+	workflow: string;
+	input?: Record<string, string>;
+}
+
+export interface RouteTargetNone {
+	short_circuit: true;
+	defaults: Record<string, unknown>;
+}
+
+export interface RouteTargetNested {
+	route: RouteBlock;
+}
+
+export type RouteTarget = string | RouteTargetAgent | RouteTargetWorkflow | RouteTargetNone | RouteTargetNested;
+
+export interface RouteBlock {
+	id: string;
+	router: string;
+	input: Record<string, string>;
+	routes: Record<string, RouteTarget>;
+	retry?: RetryConfig;
+	fallback?: { router: string; config?: Record<string, unknown> };
+}
+
+export interface RouteEntry {
+	route: RouteBlock;
+}
+
+export type WorkflowEntry = WorkflowStep | ParallelGroup | RouteEntry;
 
 export interface WorkflowDefinition {
 	name: string;
@@ -111,6 +157,12 @@ export interface WorkflowDefinition {
 export interface ExecutionContext {
 	input: unknown;
 	steps: Record<string, { output: unknown }>;
+}
+
+export interface RouteOutput {
+	route: string;
+	router_output: Record<string, unknown>;
+	result: unknown;
 }
 
 // ── Handler & schema registry types ──
