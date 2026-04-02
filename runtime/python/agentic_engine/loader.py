@@ -20,6 +20,9 @@ from .types import (
     FallbackConfig,
     ParallelGroup,
     RetryConfig,
+    RouteBlock,
+    RouteEntry,
+    RouterDefinition,
     ShortCircuit,
     WorkflowDefinition,
     WorkflowStep,
@@ -33,6 +36,7 @@ log = create_logger("loader")
 _agent_cache: dict[str, AgentDefinition] = {}
 _workflow_cache: dict[str, WorkflowDefinition] = {}
 _schema_cache: dict[str, dict[str, Any]] = {}
+_router_cache: dict[str, RouterDefinition] = {}
 _project_root: str | None = None
 
 
@@ -119,6 +123,54 @@ def load_agent(agent_id: str) -> AgentDefinition:
 
 
 # ---------------------------------------------------------------------------
+# Router loading
+# ---------------------------------------------------------------------------
+
+def load_router(router_id: str) -> RouterDefinition:
+    """Load a router definition from ``routers/<router_id>/router.yaml``.
+
+    If a ``prompt.md`` file exists alongside the YAML, its contents are stored
+    in the ``prompt`` field.
+    """
+    if router_id in _router_cache:
+        return _router_cache[router_id]
+
+    root = get_project_root()
+    router_dir = os.path.join(root, "routers", router_id)
+    yaml_path = os.path.join(router_dir, "router.yaml")
+
+    if not os.path.isfile(yaml_path):
+        raise FileNotFoundError(f"Router definition not found: {yaml_path}")
+
+    with open(yaml_path, "r", encoding="utf-8") as fh:
+        raw: dict[str, Any] = yaml.safe_load(fh)
+
+    prompt_path = os.path.join(router_dir, "prompt.md")
+    prompt = ""
+    if os.path.isfile(prompt_path):
+        with open(prompt_path, "r", encoding="utf-8") as fh:
+            prompt = fh.read().strip()
+    elif raw.get("strategy", "llm") == "llm":
+        log.warn("LLM router has no prompt.md — system prompt will be empty", router_id=router_id)
+
+    router_def = RouterDefinition(
+        name=raw.get("name", ""),
+        description=raw.get("description", ""),
+        strategy=raw.get("strategy", "llm"),
+        provider=raw.get("provider", ""),
+        model=raw.get("model", ""),
+        temperature=float(raw.get("temperature", 0.0)),
+        handler=raw.get("handler", ""),
+        prompt=prompt,
+        input=raw.get("input"),
+    )
+
+    _router_cache[router_id] = router_def
+    log.debug("Loaded router", router_id=router_id)
+    return router_def
+
+
+# ---------------------------------------------------------------------------
 # Workflow loading
 # ---------------------------------------------------------------------------
 
@@ -159,6 +211,29 @@ def _parse_step(raw: dict[str, Any]) -> WorkflowStep:
     )
 
 
+def _parse_route_entry(raw: dict[str, Any]) -> RouteEntry:
+    """Parse a raw ``route`` block dict into a ``RouteEntry`` dataclass."""
+    retry: RetryConfig | None = None
+    if "retry" in raw:
+        r = raw["retry"]
+        retry = RetryConfig(
+            max_attempts=int(r.get("max_attempts", 1)),
+            backoff_ms=int(r.get("backoff_ms", 0)),
+        )
+
+    fallback: dict[str, Any] | None = raw.get("fallback")
+
+    route_block = RouteBlock(
+        id=raw.get("id", ""),
+        router=raw.get("router", ""),
+        input=raw.get("input", {}),
+        routes=raw.get("routes", {}),
+        retry=retry,
+        fallback=fallback,
+    )
+    return RouteEntry(route=route_block)
+
+
 def load_workflow(workflow_name: str) -> WorkflowDefinition:
     """Load a workflow definition from ``workflows/<workflow_name>.yaml``."""
     if workflow_name in _workflow_cache:
@@ -173,13 +248,15 @@ def load_workflow(workflow_name: str) -> WorkflowDefinition:
     with open(yaml_path, "r", encoding="utf-8") as fh:
         raw: dict[str, Any] = yaml.safe_load(fh)
 
-    steps: list[WorkflowStep | ParallelGroup] = []
+    steps: list[WorkflowStep | ParallelGroup | RouteEntry] = []
     for entry in raw.get("steps", []):
         if "parallel" in entry:
             group = ParallelGroup(
                 parallel=[_parse_step(s) for s in entry["parallel"]]
             )
             steps.append(group)
+        elif "route" in entry:
+            steps.append(_parse_route_entry(entry["route"]))
         else:
             steps.append(_parse_step(entry))
 
@@ -254,5 +331,6 @@ def clear_caches() -> None:
     _agent_cache.clear()
     _workflow_cache.clear()
     _schema_cache.clear()
+    _router_cache.clear()
     _project_root = None
     _schemas_loaded = False
