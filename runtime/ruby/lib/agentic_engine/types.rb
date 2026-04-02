@@ -122,4 +122,27 @@ module AgenticEngine
     :parallel,       # Array of WorkflowStep
     keyword_init: true
   )
+
+  RouterDefinition = Struct.new(
+    :name, :description, :strategy, :provider, :model,
+    :temperature, :handler, :prompt, :input,
+    keyword_init: true
+  ) do
+    def to_h
+      super.compact
+    end
+  end
+
+  RouteBlock = Struct.new(
+    :id, :router, :input, :routes, :retry, :fallback,
+    keyword_init: true
+  )
+
+  RouteEntry = Struct.new(:route, keyword_init: true)
+
+  RouteOutput = Struct.new(:route, :router_output, :result, keyword_init: true) do
+    def to_h
+      { route: route, router_output: router_output, result: result }
+    end
+  end
 end
