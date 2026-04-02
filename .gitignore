@@ -12,6 +12,9 @@ __pycache__/
 *.egg-info/
 dist/
 
+# Superpowers specs/plans
+docs/superpowers/
+
 # Environment
 .env
 
