@@ -477,65 +477,39 @@ async function executeRoute(
 	const resolvedInput = resolveInputs(routeBlock.input, context);
 	const routeKeys = Object.keys(routeBlock.routes).filter((k) => k !== '_none');
 
+	// ── Phase 1: Get routing decision (retry + fallback cover decision only) ──
+
+	let chosenKey!: string;
+	let routerOutput!: Record<string, unknown>;
+	let usedFallback = false;
+	let totalAttempts = 0;
+	let decided = false;
 	let lastError: unknown;
 
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		totalAttempts = attempt;
 		log.info(`Route ${routeBlock.id}: decision attempt ${attempt}/${maxAttempts}`);
 
 		try {
-			const routerOutput = await executeRouterDecision(routerDef, resolvedInput, routeKeys);
-			const chosenKey = (routerOutput as Record<string, unknown>).route as string;
+			const output = await executeRouterDecision(routerDef, resolvedInput, routeKeys);
+			const key = (output as Record<string, unknown>).route as string;
 
-			log.info(`Route ${routeBlock.id}: chose "${chosenKey}"`, { attempt });
+			log.info(`Route ${routeBlock.id}: chose "${key}"`, { attempt });
 
-			if (chosenKey !== '_none' && !routeBlock.routes[chosenKey]) {
+			if (key !== '_none' && !routeBlock.routes[key]) {
 				throw new Error(
-					`Router "${routeBlock.router}" returned invalid route key "${chosenKey}". ` +
+					`Router "${routeBlock.router}" returned invalid route key "${key}". ` +
 					`Valid keys: ${[...routeKeys, '_none'].join(', ')}`
 				);
 			}
 
-			const target = routeBlock.routes[chosenKey] ?? routeBlock.routes['_none'];
-
-			// Handle _none / short_circuit
-			if (chosenKey === '_none' || (target && typeof target === 'object' && 'short_circuit' in target && target.short_circuit)) {
-				const output: RouteOutput = {
-					route: '_none',
-					router_output: routerOutput as Record<string, unknown>,
-					result: null,
-				};
-				return {
-					id: routeBlock.id,
-					agent: `router:${routeBlock.router}`,
-					status: 'short_circuited',
-					output,
-					metrics: ZERO_METRICS,
-					attempts: attempt,
-				};
-			}
-
-			// Dispatch to target
-			const dispatchResult = await dispatchRouteTarget(
-				target, resolvedInput, routeBlock, context, agents
-			);
-
-			const output: RouteOutput = {
-				route: chosenKey,
-				router_output: routerOutput as Record<string, unknown>,
-				result: dispatchResult.output,
-			};
-
-			return {
-				id: routeBlock.id,
-				agent: `router:${routeBlock.router}`,
-				status: 'success',
-				output,
-				metrics: dispatchResult.metrics,
-				attempts: attempt,
-			};
+			chosenKey = key;
+			routerOutput = output as Record<string, unknown>;
+			decided = true;
+			break;
 		} catch (err) {
 			lastError = err;
-			log.error(`Route ${routeBlock.id}: attempt ${attempt}/${maxAttempts} failed`, {
+			log.error(`Route ${routeBlock.id}: decision attempt ${attempt}/${maxAttempts} failed`, {
 				error: serializeError(err).message,
 			});
 			if (attempt < maxAttempts) {
@@ -546,9 +520,9 @@ async function executeRoute(
 		}
 	}
 
-	// Fallback router
-	if (routeBlock.fallback) {
-		log.info(`Route ${routeBlock.id}: trying fallback router`, {
+	// Fallback decision (if primary failed)
+	if (!decided && routeBlock.fallback) {
+		log.info(`Route ${routeBlock.id}: trying fallback router for decision`, {
 			fallback_router: routeBlock.fallback.router,
 		});
 
@@ -557,67 +531,90 @@ async function executeRoute(
 			const mergedFallback = routeBlock.fallback.config
 				? { ...fallbackDef, ...routeBlock.fallback.config }
 				: fallbackDef;
-			const routerOutput = await executeRouterDecision(
+			const output = await executeRouterDecision(
 				mergedFallback as RouterDefinition, resolvedInput, routeKeys
 			);
-			const chosenKey = (routerOutput as Record<string, unknown>).route as string;
+			const key = (output as Record<string, unknown>).route as string;
 
-			if (chosenKey !== '_none' && !routeBlock.routes[chosenKey]) {
-				throw new Error(`Fallback router returned invalid key "${chosenKey}"`);
+			log.info(`Route ${routeBlock.id}: fallback chose "${key}"`);
+
+			if (key !== '_none' && !routeBlock.routes[key]) {
+				throw new Error(`Fallback router returned invalid key "${key}"`);
 			}
 
-			const target = routeBlock.routes[chosenKey];
-			if (chosenKey === '_none' || (target && typeof target === 'object' && 'short_circuit' in target)) {
-				const output: RouteOutput = {
-					route: '_none',
-					router_output: routerOutput as Record<string, unknown>,
-					result: null,
-				};
-				return {
-					id: routeBlock.id,
-					agent: `router:${routeBlock.fallback.router}`,
-					status: 'short_circuited',
-					output,
-					metrics: ZERO_METRICS,
-					attempts: maxAttempts + 1,
-					used_fallback: true,
-				};
-			}
-
-			const dispatchResult = await dispatchRouteTarget(
-				target, resolvedInput, routeBlock, context, agents
-			);
-			const output: RouteOutput = {
-				route: chosenKey,
-				router_output: routerOutput as Record<string, unknown>,
-				result: dispatchResult.output,
-			};
-			return {
-				id: routeBlock.id,
-				agent: `router:${routeBlock.fallback.router}`,
-				status: 'success',
-				output,
-				metrics: dispatchResult.metrics,
-				attempts: maxAttempts + 1,
-				used_fallback: true,
-			};
+			chosenKey = key;
+			routerOutput = output as Record<string, unknown>;
+			usedFallback = true;
+			totalAttempts = maxAttempts + 1;
+			decided = true;
 		} catch (err) {
 			lastError = err;
-			log.error(`Route ${routeBlock.id}: fallback also failed`, {
+			log.error(`Route ${routeBlock.id}: fallback decision also failed`, {
 				error: serializeError(err).message,
 			});
+			totalAttempts = maxAttempts + 1;
 		}
 	}
 
+	if (!decided) {
+		log.error(`Route ${routeBlock.id}: all decision attempts exhausted`, {
+			total_attempts: totalAttempts,
+			final_error: serializeError(lastError).message,
+		});
+		return {
+			id: routeBlock.id,
+			agent: `router:${routeBlock.router}`,
+			status: 'error',
+			output: null,
+			metrics: ZERO_METRICS,
+			attempts: totalAttempts,
+			used_fallback: !!routeBlock.fallback,
+			error: serializeError(lastError).message,
+		};
+	}
+
+	// ── Phase 2: Handle _none / short_circuit ──
+
+	const resolvedAgent = usedFallback ? `router:${routeBlock.fallback!.router}` : `router:${routeBlock.router}`;
+	const target = routeBlock.routes[chosenKey];
+
+	if (chosenKey === '_none' || (target && typeof target === 'object' && 'short_circuit' in target && target.short_circuit)) {
+		const output: RouteOutput = {
+			route: '_none',
+			router_output: routerOutput,
+			result: null,
+		};
+		return {
+			id: routeBlock.id,
+			agent: resolvedAgent,
+			status: 'short_circuited',
+			output,
+			metrics: ZERO_METRICS,
+			attempts: totalAttempts,
+			used_fallback: usedFallback,
+		};
+	}
+
+	// ── Phase 3: Dispatch target (NO retry — target handles its own errors) ──
+
+	const dispatchResult = await dispatchRouteTarget(
+		target, resolvedInput, routeBlock, context, agents
+	);
+
+	const output: RouteOutput = {
+		route: chosenKey,
+		router_output: routerOutput,
+		result: dispatchResult.output,
+	};
+
 	return {
 		id: routeBlock.id,
-		agent: `router:${routeBlock.router}`,
-		status: 'error',
-		output: null,
-		metrics: ZERO_METRICS,
-		attempts: maxAttempts + (routeBlock.fallback ? 1 : 0),
-		used_fallback: !!routeBlock.fallback,
-		error: serializeError(lastError).message,
+		agent: resolvedAgent,
+		status: 'success',
+		output,
+		metrics: dispatchResult.metrics,
+		attempts: totalAttempts,
+		used_fallback: usedFallback,
 	};
 }
 
