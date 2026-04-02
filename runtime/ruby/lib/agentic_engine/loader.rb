@@ -12,6 +12,7 @@ module AgenticEngine
     @agents    = {} # { agent_id => AgentDefinition }
     @workflows = {} # { workflow_name => WorkflowDefinition }
     @schemas   = {} # { schema_name => Hash (parsed JSON schema wrapper) }
+    @routers   = {} # { router_id => RouterDefinition }
     @root      = nil
 
     class << self
@@ -22,6 +23,7 @@ module AgenticEngine
         @agents.clear
         @workflows.clear
         @schemas.clear
+        @routers.clear
         @root = nil
       end
 
@@ -85,6 +87,40 @@ module AgenticEngine
         @agents[agent_id] = definition
       end
 
+      # ── Router loading ──
+
+      # Load a single router by its directory-name ID (e.g. "content-classifier").
+      #
+      # @param router_id [String]
+      # @return [RouterDefinition]
+      def load_router(router_id)
+        return @routers[router_id] if @routers.key?(router_id)
+
+        router_dir = File.join(root, "routers", router_id)
+        yaml_path = File.join(router_dir, "router.yaml")
+        raise "Router not found: #{router_id} (looked in #{yaml_path})" unless File.exist?(yaml_path)
+
+        raw = YAML.safe_load(File.read(yaml_path), permitted_classes: [Symbol])
+
+        prompt = nil
+        prompt_path = File.join(router_dir, "prompt.md")
+        prompt = File.read(prompt_path).strip if File.exist?(prompt_path)
+
+        definition = RouterDefinition.new(
+          name:        raw["name"],
+          description: raw["description"],
+          strategy:    raw["strategy"],
+          provider:    raw["provider"],
+          model:       raw["model"],
+          temperature: raw["temperature"],
+          handler:     raw["handler"],
+          prompt:      prompt,
+          input:       raw["input"] || {}
+        )
+
+        @routers[router_id] = definition
+      end
+
       # ── Workflow loading ──
 
       # Load a workflow by name (filename without .yaml).
@@ -131,15 +167,36 @@ module AgenticEngine
 
       private
 
-      # Parse a single step entry which may be a plain step or a parallel group.
+      # Parse a single step entry which may be a plain step, a parallel group,
+      # or a route block.
       def parse_step_entry(entry)
         if entry.key?("parallel")
           ParallelGroup.new(
             parallel: entry["parallel"].map { |s| build_step(s) }
           )
+        elsif entry.key?("route")
+          RouteEntry.new(route: build_route_block(entry["route"]))
         else
           build_step(entry)
         end
+      end
+
+      def build_route_block(raw)
+        retry_config = if raw["retry"]
+                         { max_attempts: raw["retry"]["max_attempts"], backoff_ms: raw["retry"]["backoff_ms"] }
+                       end
+        fallback = if raw["fallback"]
+                     { router: raw["fallback"]["router"], config: raw["fallback"]["config"] }
+                   end
+
+        RouteBlock.new(
+          id:       raw["id"],
+          router:   raw["router"],
+          input:    raw["input"] || {},
+          routes:   raw["routes"] || {},
+          retry:    retry_config,
+          fallback: fallback
+        )
       end
 
       def build_step(raw)
