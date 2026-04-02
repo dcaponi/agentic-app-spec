@@ -2,8 +2,10 @@
 
 import asyncio
 import json
-import sys
 import os
+import sys
+
+from generated.workflows.groceryClassify import grocery_classify, GroceryClassifyInput
 
 # Set project root so the engine finds agents/workflows/routers here
 project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,14 +23,12 @@ if os.path.exists(env_path):
                 if value and key not in os.environ:
                     os.environ[key] = value
 
-from agentic_engine import orchestrate
-
 
 async def classify(item_name: str) -> None:
     print(f"\nClassifying: {item_name}")
     print("-" * 40)
 
-    result = await orchestrate("grocery-classify", {"item_name": item_name})
+    result = await grocery_classify(GroceryClassifyInput(item_name=item_name))
 
     status = result.get("status", "unknown")
     output = result.get("result") or result.get("output")
@@ -38,12 +38,16 @@ async def classify(item_name: str) -> None:
 
 
 async def main() -> None:
-    items = sys.argv[1:] if len(sys.argv) > 1 else [
-        "chicken breast",
-        "paper towels",
-        "canned tomatoes",
-        "spinach",
-    ]
+    items = (
+        sys.argv[1:]
+        if len(sys.argv) > 1
+        else [
+            "chicken breast",
+            "paper towels",
+            "canned tomatoes",
+            "spinach",
+        ]
+    )
 
     for item in items:
         await classify(item)

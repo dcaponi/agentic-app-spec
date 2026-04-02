@@ -1,0 +1,1 @@
+agentic_engine @ git+https://github.com/dcaponi/agentic-app-spec.git#subdirectory=runtime/python

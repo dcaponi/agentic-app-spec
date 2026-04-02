@@ -172,8 +172,8 @@ fn gen_py_agent(a: &AgentMeta) -> String {
         "# @generated from {} — do not edit\n\
          from dataclasses import dataclass\n\
          from typing import Any\n\
-         from engine.runner import invoke_agent\n\
-         from engine.types import AgentResult\n\
+         from agentic_engine.runner import invoke_agent\n\
+         from agentic_engine.types import AgentResult\n\
          \n\
          \n\
          @dataclass\n\
@@ -204,8 +204,8 @@ fn gen_py_workflow(w: &WorkflowMeta) -> String {
         "# @generated from {} — do not edit\n\
          from dataclasses import dataclass\n\
          from typing import Any\n\
-         from engine.orchestrator import orchestrate\n\
-         from engine.types import WorkflowEnvelope\n\
+         from agentic_engine.orchestrator import orchestrate\n\
+         from agentic_engine.types import WorkflowEnvelope\n\
          \n\
          \n\
          @dataclass\n\
