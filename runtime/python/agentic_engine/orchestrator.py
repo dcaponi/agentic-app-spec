@@ -248,10 +248,10 @@ async def orchestrate(
                     continue
 
                 route_result = await _execute_route(entry.route, context)
-                context.steps[entry.route.id] = {"output": route_result["output"]}
-                step_results.append(route_result)
+                context.steps[entry.route.id] = {"output": route_result.output}
+                step_results.append(_step_result_to_dict(route_result))
 
-                if route_result.get("status") == "short_circuited":
+                if route_result.error == "short_circuited":
                     short_circuited = True
                     none_target = entry.route.routes.get("_none", {})
                     sc_defaults = none_target.get("defaults", {}) if isinstance(none_target, dict) else {}
@@ -343,31 +343,31 @@ def _fill_route_skipped(
     default_output = defaults.get(route_block.id) if defaults else None
     log.info("Route skipped (short-circuited)", step_id=route_block.id, has_default=default_output is not None)
     context.steps[route_block.id] = {"output": default_output}
-    step_results.append({
-        "step_id": route_block.id,
-        "agent": f"router:{route_block.router}",
-        "output": default_output,
-        "status": "skipped",
-        "metrics": {
-            "duration_ms": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
-        "retries": 0,
-        "used_fallback": False,
-        "skipped": True,
-    })
+    sr = StepResult(
+        step_id=route_block.id,
+        agent=f"router:{route_block.router}",
+        output=default_output,
+        metrics=StepMetrics(),
+        retries=0,
+        used_fallback=False,
+    )
+    d = _step_result_to_dict(sr)
+    d["skipped"] = True
+    step_results.append(d)
 
 
 async def _execute_route(
     route_block: RouteBlock,
     context: ExecutionContext,
-) -> dict[str, Any]:
+) -> StepResult:
     """Execute a route block — 3-phase: decision (with retry/fallback), _none check, dispatch.
 
     Retry and fallback cover ONLY the router decision phase.  Dispatch happens
     outside the retry loop so that the target handles its own errors.
+
+    The returned ``StepResult.error`` field is set to ``"short_circuited"``
+    when the router selected ``_none`` or a ``short_circuit: true`` target,
+    signalling the orchestrator to halt further steps.
     """
     max_attempts = route_block.retry.max_attempts if route_block.retry else 1
     backoff_ms = route_block.retry.backoff_ms if route_block.retry else 0
@@ -489,21 +489,15 @@ async def _execute_route(
             error=error_msg,
         )
         resolved_agent = f"router:{route_block.router}"
-        return {
-            "step_id": route_block.id,
-            "agent": resolved_agent,
-            "output": None,
-            "status": "error",
-            "metrics": {
-                "duration_ms": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            },
-            "retries": total_attempts - 1,
-            "used_fallback": route_block.fallback is not None,
-            "error": error_msg,
-        }
+        return StepResult(
+            step_id=route_block.id,
+            agent=resolved_agent,
+            output=None,
+            metrics=StepMetrics(),
+            retries=total_attempts - 1,
+            used_fallback=route_block.fallback is not None,
+            error=error_msg,
+        )
 
     resolved_agent = (
         f"router:{route_block.fallback['router']}" if used_fallback and route_block.fallback
@@ -526,20 +520,15 @@ async def _execute_route(
             router_output=router_output,
             result=None,
         )
-        return {
-            "step_id": route_block.id,
-            "agent": resolved_agent,
-            "output": {"route": route_out.route, "router_output": route_out.router_output, "result": route_out.result},
-            "status": "short_circuited",
-            "metrics": {
-                "duration_ms": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            },
-            "retries": total_attempts - 1,
-            "used_fallback": used_fallback,
-        }
+        return StepResult(
+            step_id=route_block.id,
+            agent=resolved_agent,
+            output={"route": route_out.route, "router_output": route_out.router_output, "result": route_out.result},
+            metrics=StepMetrics(),
+            retries=total_attempts - 1,
+            used_fallback=used_fallback,
+            error="short_circuited",
+        )
 
     # ── Phase 3: Dispatch target (NO retry — target handles its own errors) ──
 
@@ -550,17 +539,22 @@ async def _execute_route(
         router_output=router_output,
         result=dispatch_result["output"],
     )
-    dispatch_metrics = dispatch_result["metrics"]
+    dispatch_metrics_raw = dispatch_result["metrics"]
+    dispatch_metrics = StepMetrics(
+        duration_ms=dispatch_metrics_raw.get("duration_ms", 0.0),
+        prompt_tokens=dispatch_metrics_raw.get("prompt_tokens", 0),
+        completion_tokens=dispatch_metrics_raw.get("completion_tokens", 0),
+        total_tokens=dispatch_metrics_raw.get("total_tokens", 0),
+    )
 
-    return {
-        "step_id": route_block.id,
-        "agent": resolved_agent,
-        "output": {"route": route_out.route, "router_output": route_out.router_output, "result": route_out.result},
-        "status": "success",
-        "metrics": dispatch_metrics,
-        "retries": total_attempts - 1,
-        "used_fallback": used_fallback,
-    }
+    return StepResult(
+        step_id=route_block.id,
+        agent=resolved_agent,
+        output={"route": route_out.route, "router_output": route_out.router_output, "result": route_out.result},
+        metrics=dispatch_metrics,
+        retries=total_attempts - 1,
+        used_fallback=used_fallback,
+    )
 
 
 async def _execute_router_decision(
@@ -664,9 +658,15 @@ async def _dispatch_route_target(
             fallback=nested_raw.get("fallback"),
         )
         nested_result = await _execute_route(nested_block, context)
+        nested_metrics = nested_result.metrics
         return {
-            "output": nested_result["output"],
-            "metrics": nested_result.get("metrics", zero_metrics),
+            "output": nested_result.output,
+            "metrics": {
+                "duration_ms": nested_metrics.duration_ms,
+                "prompt_tokens": nested_metrics.prompt_tokens,
+                "completion_tokens": nested_metrics.completion_tokens,
+                "total_tokens": nested_metrics.total_tokens,
+            },
         }
 
     # Agent with explicit input mapping
