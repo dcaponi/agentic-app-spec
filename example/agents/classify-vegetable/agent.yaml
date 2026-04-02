@@ -1,0 +1,12 @@
+name: Vegetable Classifier
+description: Provides detailed classification of a vegetable or fruit
+type: llm
+model: gpt-4.1-mini
+temperature: 0.1
+schema: null
+user_message: "Classify this produce item in detail.\n\nItem: {{item_name}}\n\nProvide a JSON response with: produce_type (vegetable, fruit, herb), family (botanical family or common grouping), is_organic_common (boolean), season (best season), storage (refrigerate, room_temp, either)."
+
+input:
+  item_name:
+    type: string
+    required: true
