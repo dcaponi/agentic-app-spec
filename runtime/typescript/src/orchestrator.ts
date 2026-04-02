@@ -3,13 +3,18 @@ import type {
 	WorkflowStep,
 	WorkflowEntry,
 	ParallelGroup,
+	RouteEntry,
+	RouteBlock,
+	RouteTarget,
+	RouteOutput,
 	AgentDefinition,
+	RouterDefinition,
 	ExecutionContext,
 	WorkflowEnvelope,
 	StepResult,
 	StepMetrics,
 } from './types.js';
-import { loadWorkflow, loadAllAgents, loadAgent } from './loader.js';
+import { loadWorkflow, loadAllAgents, loadAgent, loadRouter } from './loader.js';
 import { executeAgent } from './runner.js';
 import { resolveInputs, resolveOutputs } from './resolver.js';
 import { createLogger, serializeError } from './logger.js';
@@ -112,6 +117,24 @@ async function executeWorkflow(
 							condition: step.short_circuit.condition,
 						});
 					}
+				}
+			} else if (isRouteEntry(entry)) {
+				if (shortCircuited) {
+					fillRouteSkipped(entry.route, shortCircuitDefaults, context, stepResults);
+					continue;
+				}
+
+				const routeResult = await executeRoute(entry.route, context, agents);
+				context.steps[entry.route.id] = { output: routeResult.output };
+				stepResults.push(routeResult);
+
+				if (routeResult.status === 'short_circuited') {
+					shortCircuited = true;
+					const noneTarget = entry.route.routes['_none'];
+					shortCircuitDefaults = (noneTarget && typeof noneTarget === 'object' && 'defaults' in noneTarget)
+						? (noneTarget as { defaults: Record<string, unknown> }).defaults
+						: {};
+					log.info(`Short-circuit triggered by route: ${entry.route.id}`);
 				}
 			} else {
 				if (shortCircuited) {
@@ -331,6 +354,10 @@ function isParallelGroup(entry: WorkflowEntry): entry is ParallelGroup {
 	return 'parallel' in entry;
 }
 
+function isRouteEntry(entry: WorkflowEntry): entry is RouteEntry {
+	return 'route' in entry;
+}
+
 function evaluateCondition(condition: string, output: unknown): boolean {
 	try {
 		const fn = new Function('output', `"use strict"; return (${condition});`);
@@ -358,6 +385,26 @@ function fillSkipped(
 	results.push({
 		id: step.id,
 		agent: step.agent,
+		status: 'skipped',
+		output: defaultOutput,
+		metrics: ZERO_METRICS,
+	});
+}
+
+function fillRouteSkipped(
+	routeBlock: RouteBlock,
+	defaults: Record<string, unknown> | undefined,
+	context: ExecutionContext,
+	results: StepResult[]
+): void {
+	const defaultOutput = defaults?.[routeBlock.id] ?? null;
+	log.info(`Route ${routeBlock.id}: skipped (short-circuited)`, {
+		has_default: defaultOutput !== null,
+	});
+	context.steps[routeBlock.id] = { output: defaultOutput };
+	results.push({
+		id: routeBlock.id,
+		agent: `router:${routeBlock.router}`,
 		status: 'skipped',
 		output: defaultOutput,
 		metrics: ZERO_METRICS,
@@ -407,4 +454,262 @@ function buildEnvelope(
 		result,
 		error,
 	};
+}
+
+// ── Route execution engine ──
+
+async function executeRoute(
+	routeBlock: RouteBlock,
+	context: ExecutionContext,
+	agents: Map<string, AgentDefinition>
+): Promise<StepResult> {
+	const maxAttempts = routeBlock.retry?.max_attempts ?? 1;
+	const backoffMs = routeBlock.retry?.backoff_ms ?? 0;
+
+	log.info(`Route ${routeBlock.id}: starting`, {
+		router: routeBlock.router,
+		route_keys: Object.keys(routeBlock.routes),
+		max_attempts: maxAttempts,
+		has_fallback: !!routeBlock.fallback,
+	});
+
+	const routerDef = loadRouter(routeBlock.router);
+	const resolvedInput = resolveInputs(routeBlock.input, context);
+	const routeKeys = Object.keys(routeBlock.routes).filter((k) => k !== '_none');
+
+	let lastError: unknown;
+
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		log.info(`Route ${routeBlock.id}: decision attempt ${attempt}/${maxAttempts}`);
+
+		try {
+			const routerOutput = await executeRouterDecision(routerDef, resolvedInput, routeKeys);
+			const chosenKey = (routerOutput as Record<string, unknown>).route as string;
+
+			log.info(`Route ${routeBlock.id}: chose "${chosenKey}"`, { attempt });
+
+			if (chosenKey !== '_none' && !routeBlock.routes[chosenKey]) {
+				throw new Error(
+					`Router "${routeBlock.router}" returned invalid route key "${chosenKey}". ` +
+					`Valid keys: ${[...routeKeys, '_none'].join(', ')}`
+				);
+			}
+
+			const target = routeBlock.routes[chosenKey] ?? routeBlock.routes['_none'];
+
+			// Handle _none / short_circuit
+			if (chosenKey === '_none' || (target && typeof target === 'object' && 'short_circuit' in target && target.short_circuit)) {
+				const output: RouteOutput = {
+					route: '_none',
+					router_output: routerOutput as Record<string, unknown>,
+					result: null,
+				};
+				return {
+					id: routeBlock.id,
+					agent: `router:${routeBlock.router}`,
+					status: 'short_circuited',
+					output,
+					metrics: ZERO_METRICS,
+					attempts: attempt,
+				};
+			}
+
+			// Dispatch to target
+			const dispatchResult = await dispatchRouteTarget(
+				target, resolvedInput, routeBlock, context, agents
+			);
+
+			const output: RouteOutput = {
+				route: chosenKey,
+				router_output: routerOutput as Record<string, unknown>,
+				result: dispatchResult.output,
+			};
+
+			return {
+				id: routeBlock.id,
+				agent: `router:${routeBlock.router}`,
+				status: 'success',
+				output,
+				metrics: dispatchResult.metrics,
+				attempts: attempt,
+			};
+		} catch (err) {
+			lastError = err;
+			log.error(`Route ${routeBlock.id}: attempt ${attempt}/${maxAttempts} failed`, {
+				error: serializeError(err).message,
+			});
+			if (attempt < maxAttempts) {
+				const waitMs = backoffMs * attempt;
+				log.info(`Route ${routeBlock.id}: waiting ${waitMs}ms before retry`);
+				await sleep(waitMs);
+			}
+		}
+	}
+
+	// Fallback router
+	if (routeBlock.fallback) {
+		log.info(`Route ${routeBlock.id}: trying fallback router`, {
+			fallback_router: routeBlock.fallback.router,
+		});
+
+		try {
+			const fallbackDef = loadRouter(routeBlock.fallback.router);
+			const mergedFallback = routeBlock.fallback.config
+				? { ...fallbackDef, ...routeBlock.fallback.config }
+				: fallbackDef;
+			const routerOutput = await executeRouterDecision(
+				mergedFallback as RouterDefinition, resolvedInput, routeKeys
+			);
+			const chosenKey = (routerOutput as Record<string, unknown>).route as string;
+
+			if (chosenKey !== '_none' && !routeBlock.routes[chosenKey]) {
+				throw new Error(`Fallback router returned invalid key "${chosenKey}"`);
+			}
+
+			const target = routeBlock.routes[chosenKey];
+			if (chosenKey === '_none' || (target && typeof target === 'object' && 'short_circuit' in target)) {
+				const output: RouteOutput = {
+					route: '_none',
+					router_output: routerOutput as Record<string, unknown>,
+					result: null,
+				};
+				return {
+					id: routeBlock.id,
+					agent: `router:${routeBlock.fallback.router}`,
+					status: 'short_circuited',
+					output,
+					metrics: ZERO_METRICS,
+					attempts: maxAttempts + 1,
+					used_fallback: true,
+				};
+			}
+
+			const dispatchResult = await dispatchRouteTarget(
+				target, resolvedInput, routeBlock, context, agents
+			);
+			const output: RouteOutput = {
+				route: chosenKey,
+				router_output: routerOutput as Record<string, unknown>,
+				result: dispatchResult.output,
+			};
+			return {
+				id: routeBlock.id,
+				agent: `router:${routeBlock.fallback.router}`,
+				status: 'success',
+				output,
+				metrics: dispatchResult.metrics,
+				attempts: maxAttempts + 1,
+				used_fallback: true,
+			};
+		} catch (err) {
+			lastError = err;
+			log.error(`Route ${routeBlock.id}: fallback also failed`, {
+				error: serializeError(err).message,
+			});
+		}
+	}
+
+	return {
+		id: routeBlock.id,
+		agent: `router:${routeBlock.router}`,
+		status: 'error',
+		output: null,
+		metrics: ZERO_METRICS,
+		attempts: maxAttempts + (routeBlock.fallback ? 1 : 0),
+		used_fallback: !!routeBlock.fallback,
+		error: serializeError(lastError).message,
+	};
+}
+
+async function executeRouterDecision(
+	routerDef: RouterDefinition,
+	resolvedInput: Record<string, unknown>,
+	routeKeys: string[]
+): Promise<unknown> {
+	if (routerDef.strategy === 'deterministic') {
+		const agentCompat: AgentDefinition = {
+			name: routerDef.name,
+			description: routerDef.description,
+			type: 'deterministic',
+			handler: routerDef.handler,
+		};
+		const result = await executeAgent(resolvedInput, agentCompat);
+		return result.output;
+	}
+
+	// LLM strategy
+	const { callLLM } = await import('./llm.js');
+	const inputSummary = Object.entries(resolvedInput)
+		.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+		.join('\n');
+
+	const userMessage =
+		`${inputSummary}\n\n` +
+		`You must choose exactly one of the following routes: ${routeKeys.join(', ')}\n` +
+		`If none of the routes apply, choose: _none\n` +
+		`Respond with a JSON object: { "route": "<chosen_key>" }`;
+
+	const result = await callLLM({
+		model: routerDef.model ?? 'gpt-4.1-mini',
+		systemPrompt: routerDef.prompt ?? '',
+		userContent: userMessage,
+		temperature: routerDef.temperature ?? 0,
+		schemaName: null,
+		provider: routerDef.provider,
+	});
+
+	return result.output;
+}
+
+async function dispatchRouteTarget(
+	target: RouteTarget,
+	passThrough: Record<string, unknown>,
+	routeBlock: RouteBlock,
+	context: ExecutionContext,
+	agents: Map<string, AgentDefinition>
+): Promise<{ output: unknown; metrics: StepMetrics }> {
+	// String target — agent ID with pass-through input
+	if (typeof target === 'string') {
+		const agentDef = agents.get(target) ?? loadAgent(target);
+		const result = await executeAgent(passThrough, agentDef);
+		return result;
+	}
+
+	// Nested route block
+	if ('route' in target) {
+		const nestedResult = await executeRoute(
+			(target as { route: RouteBlock }).route, context, agents
+		);
+		return { output: nestedResult.output, metrics: nestedResult.metrics };
+	}
+
+	// Agent with explicit input
+	if ('agent' in target) {
+		const agentTarget = target as { agent: string; input?: Record<string, string> };
+		const agentDef = agents.get(agentTarget.agent) ?? loadAgent(agentTarget.agent);
+		const agentInput = agentTarget.input
+			? resolveInputs(agentTarget.input, context)
+			: passThrough;
+		const result = await executeAgent(agentInput, agentDef);
+		return result;
+	}
+
+	// Workflow target
+	if ('workflow' in target) {
+		const wfTarget = target as { workflow: string; input?: Record<string, string> };
+		const wfInput = wfTarget.input
+			? resolveInputs(wfTarget.input, context)
+			: passThrough;
+		const envelope = await orchestrate(wfTarget.workflow, wfInput);
+		return {
+			output: envelope.result,
+			metrics: {
+				latency_ms: envelope.metrics.total_latency_ms,
+				input_tokens: envelope.metrics.total_input_tokens,
+				output_tokens: envelope.metrics.total_output_tokens,
+			},
+		};
+	}
+
+	throw new Error(`Unknown route target type in route ${routeBlock.id}: ${JSON.stringify(target)}`);
 }
