@@ -110,3 +110,39 @@ type ExecutionContext struct {
 	Input interface{}
 	Steps map[string]map[string]interface{} // step_id -> {"output": value}
 }
+
+// RouterDefinition is parsed from routers/<id>/router.yaml.
+type RouterDefinition struct {
+	Name        string                   `yaml:"name" json:"name"`
+	Description string                   `yaml:"description" json:"description"`
+	Strategy    string                   `yaml:"strategy" json:"strategy"` // "llm" or "deterministic"
+	Provider    string                   `yaml:"provider" json:"provider"`
+	Model       string                   `yaml:"model" json:"model"`
+	Temperature float64                  `yaml:"temperature" json:"temperature"`
+	Handler     string                   `yaml:"handler" json:"handler"`
+	Prompt      string                   `yaml:"-" json:"-"`
+	Input       map[string]InputParamDef `yaml:"input" json:"input"`
+}
+
+// RouteBlock is a routing step in a workflow.
+type RouteBlock struct {
+	ID       string                 `yaml:"id" json:"id"`
+	Router   string                 `yaml:"router" json:"router"`
+	Input    map[string]interface{} `yaml:"input" json:"input"`
+	Routes   map[string]interface{} `yaml:"routes" json:"routes"`
+	Retry    *RetryConfig           `yaml:"retry" json:"retry"`
+	Fallback *RouterFallbackConfig  `yaml:"fallback" json:"fallback"`
+}
+
+// RouterFallbackConfig identifies an alternate router to use when retries are exhausted.
+type RouterFallbackConfig struct {
+	Router string                 `yaml:"router" json:"router"`
+	Config map[string]interface{} `yaml:"config" json:"config"`
+}
+
+// RouteOutput is the output of a route step.
+type RouteOutput struct {
+	Route        string                 `json:"route"`
+	RouterOutput map[string]interface{} `json:"router_output"`
+	Result       interface{}            `json:"result"`
+}
