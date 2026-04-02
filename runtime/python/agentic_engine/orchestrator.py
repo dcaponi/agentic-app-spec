@@ -9,18 +9,26 @@ retry, fallback, and short-circuit directives), and returns a
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .loader import load_agent, load_workflow
+from .llm import call_llm
+from .loader import load_agent, load_router, load_workflow
 from .logger import create_logger, serialize_error
 from .resolver import resolve_inputs, resolve_outputs
 from .runner import execute_agent
 from .types import (
+    AgentDefinition,
     ExecutionContext,
     ParallelGroup,
+    RetryConfig,
+    RouteBlock,
+    RouteEntry,
+    RouteOutput,
+    RouterDefinition,
     StepMetrics,
     StepResult,
     WorkflowStep,
@@ -233,6 +241,23 @@ async def orchestrate(
                             short_circuited = True
                             short_circuit_defaults = ps.short_circuit.defaults
 
+            # ---- Route entry ------------------------------------------------
+            elif isinstance(entry, RouteEntry):
+                if short_circuited:
+                    _fill_route_skipped(entry.route, short_circuit_defaults, context, step_results)
+                    continue
+
+                route_result = await _execute_route(entry.route, context)
+                context.steps[entry.route.id] = {"output": route_result["output"]}
+                step_results.append(route_result)
+
+                if route_result.get("status") == "short_circuited":
+                    short_circuited = True
+                    none_target = entry.route.routes.get("_none", {})
+                    sc_defaults = none_target.get("defaults", {}) if isinstance(none_target, dict) else {}
+                    short_circuit_defaults = sc_defaults
+                    log.info("Short-circuit triggered by route", step_id=entry.route.id)
+
             # ---- Serial step ------------------------------------------------
             elif isinstance(entry, WorkflowStep):
                 if short_circuited:
@@ -302,6 +327,390 @@ async def orchestrate(
         duration_ms=total_ms,
     )
     return envelope
+
+
+# ---------------------------------------------------------------------------
+# Route execution helpers
+# ---------------------------------------------------------------------------
+
+def _fill_route_skipped(
+    route_block: RouteBlock,
+    defaults: dict[str, Any],
+    context: ExecutionContext,
+    step_results: list[dict[str, Any]],
+) -> None:
+    """Build a skipped step result for a route block and update context."""
+    default_output = defaults.get(route_block.id) if defaults else None
+    log.info("Route skipped (short-circuited)", step_id=route_block.id, has_default=default_output is not None)
+    context.steps[route_block.id] = {"output": default_output}
+    step_results.append({
+        "step_id": route_block.id,
+        "agent": f"router:{route_block.router}",
+        "output": default_output,
+        "status": "skipped",
+        "metrics": {
+            "duration_ms": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+        "retries": 0,
+        "used_fallback": False,
+        "skipped": True,
+    })
+
+
+async def _execute_route(
+    route_block: RouteBlock,
+    context: ExecutionContext,
+) -> dict[str, Any]:
+    """Execute a route block — 3-phase: decision (with retry/fallback), _none check, dispatch.
+
+    Retry and fallback cover ONLY the router decision phase.  Dispatch happens
+    outside the retry loop so that the target handles its own errors.
+    """
+    max_attempts = route_block.retry.max_attempts if route_block.retry else 1
+    backoff_ms = route_block.retry.backoff_ms if route_block.retry else 0
+
+    log.info(
+        "Route starting",
+        step_id=route_block.id,
+        router=route_block.router,
+        route_keys=list(route_block.routes.keys()),
+        max_attempts=max_attempts,
+        has_fallback=route_block.fallback is not None,
+    )
+
+    router_def = load_router(route_block.router)
+    resolved_input = resolve_inputs(route_block.input, context)
+    route_keys = [k for k in route_block.routes.keys() if k != "_none"]
+
+    # ── Phase 1: Router decision (retry + fallback cover this phase only) ──
+
+    chosen_key: str | None = None
+    router_output: dict[str, Any] = {}
+    used_fallback = False
+    total_attempts = 0
+    decided = False
+    last_error: BaseException | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        total_attempts = attempt
+        log.info("Route decision attempt", step_id=route_block.id, attempt=attempt, max_attempts=max_attempts)
+        try:
+            output = await _execute_router_decision(router_def, resolved_input, route_keys)
+            key = output.get("route") if isinstance(output, dict) else None
+
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"Router '{route_block.router}' did not return a string 'route' key; got: {output!r}"
+                )
+
+            log.info("Route decision made", step_id=route_block.id, chosen_key=key, attempt=attempt)
+
+            if key != "_none" and key not in route_block.routes:
+                raise ValueError(
+                    f"Router '{route_block.router}' returned invalid route key '{key}'. "
+                    f"Valid keys: {[*route_keys, '_none']}"
+                )
+
+            chosen_key = key
+            router_output = output if isinstance(output, dict) else {"route": key}
+            decided = True
+            break
+        except Exception as exc:
+            last_error = exc
+            log.warn(
+                "Route decision attempt failed",
+                step_id=route_block.id,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                error=str(exc),
+            )
+            if attempt < max_attempts:
+                delay = backoff_ms * attempt / 1000.0
+                await asyncio.sleep(delay)
+
+    # Fallback decision (if primary failed)
+    if not decided and route_block.fallback:
+        fallback_router_id = route_block.fallback.get("router", "")
+        fallback_config = route_block.fallback.get("config", {})
+        log.info(
+            "Route trying fallback router for decision",
+            step_id=route_block.id,
+            fallback_router=fallback_router_id,
+        )
+        try:
+            fallback_def = load_router(fallback_router_id)
+            # Merge fallback config overrides onto the router definition
+            merged_fallback = RouterDefinition(
+                name=fallback_def.name,
+                description=fallback_def.description,
+                strategy=fallback_config.get("strategy", fallback_def.strategy),
+                provider=fallback_config.get("provider", fallback_def.provider),
+                model=fallback_config.get("model", fallback_def.model),
+                temperature=float(fallback_config.get("temperature", fallback_def.temperature)),
+                handler=fallback_config.get("handler", fallback_def.handler),
+                prompt=fallback_config.get("prompt", fallback_def.prompt),
+                input=fallback_def.input,
+            )
+            output = await _execute_router_decision(merged_fallback, resolved_input, route_keys)
+            key = output.get("route") if isinstance(output, dict) else None
+
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"Fallback router '{fallback_router_id}' did not return a string 'route' key; got: {output!r}"
+                )
+
+            if key != "_none" and key not in route_block.routes:
+                raise ValueError(f"Fallback router returned invalid key '{key}'")
+
+            chosen_key = key
+            router_output = output if isinstance(output, dict) else {"route": key}
+            used_fallback = True
+            total_attempts = max_attempts + 1
+            decided = True
+            log.info("Route fallback decision made", step_id=route_block.id, chosen_key=key)
+        except Exception as exc:
+            last_error = exc
+            total_attempts = max_attempts + 1
+            log.error(
+                "Route fallback decision also failed",
+                step_id=route_block.id,
+                error=str(exc),
+            )
+
+    if not decided:
+        error_msg = str(last_error) if last_error else "All decision attempts exhausted"
+        log.error(
+            "Route all decision attempts exhausted",
+            step_id=route_block.id,
+            total_attempts=total_attempts,
+            error=error_msg,
+        )
+        resolved_agent = f"router:{route_block.router}"
+        return {
+            "step_id": route_block.id,
+            "agent": resolved_agent,
+            "output": None,
+            "status": "error",
+            "metrics": {
+                "duration_ms": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+            "retries": total_attempts - 1,
+            "used_fallback": route_block.fallback is not None,
+            "error": error_msg,
+        }
+
+    resolved_agent = (
+        f"router:{route_block.fallback['router']}" if used_fallback and route_block.fallback
+        else f"router:{route_block.router}"
+    )
+    target = route_block.routes.get(chosen_key)  # type: ignore[arg-type]
+
+    # ── Phase 2: Handle _none / short_circuit ──
+
+    is_none = chosen_key == "_none"
+    is_short_circuit = (
+        not is_none
+        and isinstance(target, dict)
+        and target.get("short_circuit") is True
+    )
+
+    if is_none or is_short_circuit:
+        route_out = RouteOutput(
+            route="_none",
+            router_output=router_output,
+            result=None,
+        )
+        return {
+            "step_id": route_block.id,
+            "agent": resolved_agent,
+            "output": {"route": route_out.route, "router_output": route_out.router_output, "result": route_out.result},
+            "status": "short_circuited",
+            "metrics": {
+                "duration_ms": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+            "retries": total_attempts - 1,
+            "used_fallback": used_fallback,
+        }
+
+    # ── Phase 3: Dispatch target (NO retry — target handles its own errors) ──
+
+    dispatch_result = await _dispatch_route_target(target, resolved_input, route_block, context)
+
+    route_out = RouteOutput(
+        route=chosen_key,  # type: ignore[arg-type]
+        router_output=router_output,
+        result=dispatch_result["output"],
+    )
+    dispatch_metrics = dispatch_result["metrics"]
+
+    return {
+        "step_id": route_block.id,
+        "agent": resolved_agent,
+        "output": {"route": route_out.route, "router_output": route_out.router_output, "result": route_out.result},
+        "status": "success",
+        "metrics": dispatch_metrics,
+        "retries": total_attempts - 1,
+        "used_fallback": used_fallback,
+    }
+
+
+async def _execute_router_decision(
+    router_def: RouterDefinition,
+    resolved_input: dict[str, Any],
+    route_keys: list[str],
+) -> dict[str, Any]:
+    """Call the router and return its raw output dict (must contain ``route`` key)."""
+    if router_def.strategy == "deterministic":
+        # Build an AgentDefinition-compatible object for execute_agent
+        agent_compat = AgentDefinition(
+            name=router_def.name,
+            description=router_def.description,
+            type="deterministic",
+            handler=router_def.handler,
+        )
+        result = await execute_agent(resolved_input, agent_compat)
+        output = result.output
+        return output if isinstance(output, dict) else {"route": output}
+
+    # LLM strategy
+    input_summary = "\n".join(
+        f"{k}: {v if isinstance(v, str) else json.dumps(v, default=str)}"
+        for k, v in resolved_input.items()
+    )
+    user_message = (
+        f"{input_summary}\n\n"
+        f"You must choose exactly one of the following routes: {', '.join(route_keys)}\n"
+        f"If none of the routes apply, choose: _none\n"
+        f"Respond with a JSON object: {{\"route\": \"<chosen_key>\"}}"
+    )
+
+    output, _metrics = await call_llm(
+        model=router_def.model or "gpt-4.1-mini",
+        system_prompt=router_def.prompt or "",
+        user_content=user_message,
+        temperature=router_def.temperature,
+        schema_name=None,
+        provider=router_def.provider,
+    )
+    return output if isinstance(output, dict) else {"route": output}
+
+
+async def _dispatch_route_target(
+    target: Any,
+    pass_through: dict[str, Any],
+    route_block: RouteBlock,
+    context: ExecutionContext,
+) -> dict[str, Any]:
+    """Dispatch to the route target and return ``{"output": ..., "metrics": {...}}``.
+
+    Supported target shapes:
+    - str                     → agent ID with pass-through input
+    - dict with "route"       → nested RouteBlock (recursive)
+    - dict with "agent"       → agent with explicit or pass-through input
+    - dict with "workflow"    → sub-workflow, use envelope result
+    """
+    zero_metrics = {
+        "duration_ms": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+
+    # String target — agent ID with pass-through input
+    if isinstance(target, str):
+        agent_def = load_agent(target)
+        result = await execute_agent(pass_through, agent_def)
+        return {
+            "output": result.output,
+            "metrics": {
+                "duration_ms": result.metrics.duration_ms,
+                "prompt_tokens": result.metrics.prompt_tokens,
+                "completion_tokens": result.metrics.completion_tokens,
+                "total_tokens": result.metrics.total_tokens,
+            },
+        }
+
+    if not isinstance(target, dict):
+        raise ValueError(
+            f"Unknown route target type in route '{route_block.id}': {target!r}"
+        )
+
+    # Nested route block
+    if "route" in target:
+        nested_raw = target["route"]
+        # Parse nested route block from dict
+        nested_retry = None
+        if "retry" in nested_raw:
+            r = nested_raw["retry"]
+            nested_retry = RetryConfig(
+                max_attempts=int(r.get("max_attempts", 1)),
+                backoff_ms=int(r.get("backoff_ms", 0)),
+            )
+        nested_block = RouteBlock(
+            id=nested_raw.get("id", ""),
+            router=nested_raw.get("router", ""),
+            input=nested_raw.get("input", {}),
+            routes=nested_raw.get("routes", {}),
+            retry=nested_retry,
+            fallback=nested_raw.get("fallback"),
+        )
+        nested_result = await _execute_route(nested_block, context)
+        return {
+            "output": nested_result["output"],
+            "metrics": nested_result.get("metrics", zero_metrics),
+        }
+
+    # Agent with explicit input mapping
+    if "agent" in target:
+        agent_id = target["agent"]
+        agent_def = load_agent(agent_id)
+        agent_input = (
+            resolve_inputs(target["input"], context)
+            if target.get("input")
+            else pass_through
+        )
+        result = await execute_agent(agent_input, agent_def)
+        return {
+            "output": result.output,
+            "metrics": {
+                "duration_ms": result.metrics.duration_ms,
+                "prompt_tokens": result.metrics.prompt_tokens,
+                "completion_tokens": result.metrics.completion_tokens,
+                "total_tokens": result.metrics.total_tokens,
+            },
+        }
+
+    # Workflow target
+    if "workflow" in target:
+        wf_name = target["workflow"]
+        wf_input = (
+            resolve_inputs(target["input"], context)
+            if target.get("input")
+            else pass_through
+        )
+        envelope = await orchestrate(wf_name, wf_input)
+        return {
+            "output": envelope.get("output"),
+            "metrics": {
+                "duration_ms": envelope.get("metrics", {}).get("total_duration_ms", 0),
+                "prompt_tokens": envelope.get("metrics", {}).get("total_prompt_tokens", 0),
+                "completion_tokens": envelope.get("metrics", {}).get("total_completion_tokens", 0),
+                "total_tokens": envelope.get("metrics", {}).get("total_tokens", 0),
+            },
+        }
+
+    raise ValueError(
+        f"Unknown route target shape in route '{route_block.id}': {target!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
