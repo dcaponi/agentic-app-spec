@@ -438,7 +438,7 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 		})
 
 		if attempt < maxAttempts && backoffMs > 0 {
-			time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+			time.Sleep(time.Duration(backoffMs*attempt) * time.Millisecond)
 		}
 	}
 
@@ -693,10 +693,11 @@ func dispatchRouteTarget(target interface{}, passThrough map[string]interface{},
 		if err != nil {
 			return nil, err
 		}
+		latency, _ := envelope.Metrics["total_latency_ms"].(float64)
 		return &AgentResult{
 			Output: envelope.Result,
 			Metrics: StepMetrics{
-				LatencyMs:    envelope.Metrics["total_latency_ms"].(float64),
+				LatencyMs:    latency,
 				InputTokens:  toInt(envelope.Metrics["total_input_tokens"]),
 				OutputTokens: toInt(envelope.Metrics["total_output_tokens"]),
 			},
