@@ -1,0 +1,12 @@
+name: Food Classifier
+description: Provides detailed classification of a food item
+type: llm
+model: gpt-4.1-mini
+temperature: 0.1
+schema: null
+user_message: "Classify this food item and provide details.\n\nItem: {{item_name}}\n\nProvide a JSON response with: category (general food category), subcategory (specific type), is_perishable (boolean), typical_aisle (where in a grocery store)."
+
+input:
+  item_name:
+    type: string
+    required: true

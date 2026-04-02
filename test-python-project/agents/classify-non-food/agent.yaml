@@ -1,0 +1,12 @@
+name: Non-Food Classifier
+description: Provides detailed classification of a non-food grocery item
+type: llm
+model: gpt-4.1-mini
+temperature: 0.1
+schema: null
+user_message: "Classify this non-food item and provide details.\n\nItem: {{item_name}}\n\nProvide a JSON response with: category (general category), subcategory (specific type), typical_aisle (where in a grocery store)."
+
+input:
+  item_name:
+    type: string
+    required: true

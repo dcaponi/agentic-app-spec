@@ -19,6 +19,7 @@ func main() {
 	http.HandleFunc("/review", handleReview)
 	http.HandleFunc("/quick-review", handleQuickReview)
 	http.HandleFunc("/comparison", handleComparison)
+	http.HandleFunc("/classify", handleClassify)
 
 	port := "8080"
 	fmt.Printf("Listening on :%s\n", port)
@@ -126,6 +127,27 @@ func handleComparison(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result.Output)
+}
+
+func handleClassify(w http.ResponseWriter, r *http.Request) {
+	itemName := r.URL.Query().Get("item")
+	if itemName == "" {
+		http.Error(w, `{"error":"item query param required"}`, http.StatusBadRequest)
+		return
+	}
+
+	envelope, err := engine.Orchestrate("grocery-classify", map[string]interface{}{
+		"item_name": itemName,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(envelope)
 }
 
 // productFetchHandler fetches product data from DummyJSON API
