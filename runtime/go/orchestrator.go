@@ -56,6 +56,9 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 					envelope.Steps = append(envelope.Steps, buildSkippedResult(ps.ID, ps.Agent, shortCircuitDefaults))
 					populateCtxFromDefaults(ctx, ps.ID, shortCircuitDefaults)
 				}
+			case *RouteBlock:
+				envelope.Steps = append(envelope.Steps, buildSkippedResult(s.ID, "router:"+s.Router, shortCircuitDefaults))
+				populateCtxFromDefaults(ctx, s.ID, shortCircuitDefaults)
 			}
 			continue
 		}
@@ -84,6 +87,25 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 				if result.Status == "success" {
 					ctx.Steps[stepID] = map[string]interface{}{"output": result.Output}
 				}
+			}
+
+		case *RouteBlock:
+			result := executeRoute(s, ctx)
+			envelope.Steps = append(envelope.Steps, *result)
+			if result.Status == "success" || result.Status == "short_circuited" {
+				ctx.Steps[s.ID] = map[string]interface{}{"output": result.Output}
+			}
+			if result.Status == "short_circuited" {
+				shortCircuited = true
+				// Extract defaults from the _none target if present
+				if noneTarget, ok := s.Routes["_none"]; ok {
+					if noneMap, ok := noneTarget.(map[string]interface{}); ok {
+						if defaults, ok := noneMap["defaults"].(map[string]interface{}); ok {
+							shortCircuitDefaults = defaults
+						}
+					}
+				}
+				envelope.Status = "short_circuited"
 			}
 		}
 	}
@@ -332,6 +354,417 @@ func populateCtxFromDefaults(ctx *ExecutionContext, stepID string, defaults map[
 	if val, ok := defaults[stepID]; ok {
 		ctx.Steps[stepID] = map[string]interface{}{"output": val}
 	}
+}
+
+// ── Route execution engine ──
+
+// executeRoute executes a RouteBlock in three phases:
+// Phase 1: router decision with retry + fallback
+// Phase 2: handle _none (short-circuit)
+// Phase 3: dispatch target (no retry)
+func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
+	maxAttempts := 1
+	backoffMs := 0
+	if rb.Retry != nil {
+		maxAttempts = rb.Retry.MaxAttempts
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+		backoffMs = rb.Retry.BackoffMs
+	}
+
+	orchLog.Info("route starting", map[string]interface{}{
+		"id":           rb.ID,
+		"router":       rb.Router,
+		"route_keys":   routeKeys(rb),
+		"max_attempts": maxAttempts,
+		"has_fallback": rb.Fallback != nil,
+	})
+
+	routerDef, err := LoadRouter(rb.Router)
+	if err != nil {
+		return &StepResult{
+			ID:     rb.ID,
+			Agent:  "router:" + rb.Router,
+			Status: "error",
+			Error:  err.Error(),
+		}
+	}
+
+	resolvedInput := ResolveInputs(rb.Input, ctx)
+	keys := routeKeys(rb)
+
+	// ── Phase 1: Decision with retry + fallback ──
+
+	var chosenKey string
+	var routerOutput map[string]interface{}
+	usedFallback := false
+	totalAttempts := 0
+	decided := false
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		totalAttempts = attempt
+		orchLog.Debug("route decision attempt", map[string]interface{}{
+			"id":      rb.ID,
+			"attempt": attempt,
+		})
+
+		output, err := executeRouterDecision(routerDef, resolvedInput, keys)
+		if err == nil {
+			key, _ := output["route"].(string)
+			if key != "_none" {
+				if _, exists := rb.Routes[key]; !exists {
+					err = fmt.Errorf("router %q returned invalid route key %q; valid: %v", rb.Router, key, append(keys, "_none"))
+				}
+			}
+			if err == nil {
+				chosenKey = key
+				routerOutput = output
+				decided = true
+				orchLog.Info("route decision made", map[string]interface{}{
+					"id":    rb.ID,
+					"route": chosenKey,
+				})
+				break
+			}
+		}
+
+		lastErr = err
+		orchLog.Warn("route decision attempt failed", map[string]interface{}{
+			"id":      rb.ID,
+			"attempt": attempt,
+			"error":   err.Error(),
+		})
+
+		if attempt < maxAttempts && backoffMs > 0 {
+			time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+		}
+	}
+
+	// Fallback decision
+	if !decided && rb.Fallback != nil {
+		orchLog.Info("trying fallback router", map[string]interface{}{
+			"id":             rb.ID,
+			"fallback_router": rb.Fallback.Router,
+		})
+
+		fallbackDef, ferr := LoadRouter(rb.Fallback.Router)
+		if ferr == nil {
+			// Merge fallback config overrides into a copy
+			mergedDef := *fallbackDef
+			if rb.Fallback.Config != nil {
+				for k, v := range rb.Fallback.Config {
+					switch k {
+					case "model":
+						if s, ok := v.(string); ok {
+							mergedDef.Model = s
+						}
+					case "temperature":
+						if f, ok := v.(float64); ok {
+							mergedDef.Temperature = f
+						}
+					}
+				}
+			}
+
+			output, ferr2 := executeRouterDecision(&mergedDef, resolvedInput, keys)
+			if ferr2 == nil {
+				key, _ := output["route"].(string)
+				if key != "_none" {
+					if _, exists := rb.Routes[key]; !exists {
+						ferr2 = fmt.Errorf("fallback router returned invalid key %q", key)
+					}
+				}
+				if ferr2 == nil {
+					chosenKey = key
+					routerOutput = output
+					usedFallback = true
+					totalAttempts = maxAttempts + 1
+					decided = true
+				} else {
+					lastErr = ferr2
+				}
+			} else {
+				lastErr = ferr2
+			}
+		} else {
+			lastErr = ferr
+		}
+
+		if !decided {
+			totalAttempts = maxAttempts + 1
+		}
+	}
+
+	if !decided {
+		errMsg := "all decision attempts exhausted"
+		if lastErr != nil {
+			errMsg = lastErr.Error()
+		}
+		orchLog.Warn("route failed", map[string]interface{}{"id": rb.ID, "error": errMsg})
+		return &StepResult{
+			ID:           rb.ID,
+			Agent:        "router:" + rb.Router,
+			Status:       "error",
+			Metrics:      StepMetrics{},
+			Attempts:     totalAttempts,
+			UsedFallback: rb.Fallback != nil,
+			Error:        errMsg,
+		}
+	}
+
+	resolvedAgent := "router:" + rb.Router
+	if usedFallback {
+		resolvedAgent = "router:" + rb.Fallback.Router
+	}
+
+	// ── Phase 2: Handle _none → short_circuited ──
+
+	target := rb.Routes[chosenKey]
+	isNone := chosenKey == "_none"
+	if !isNone {
+		if targetMap, ok := target.(map[string]interface{}); ok {
+			if sc, _ := targetMap["short_circuit"].(bool); sc {
+				isNone = true
+			}
+		}
+	}
+
+	if isNone {
+		output := &RouteOutput{
+			Route:        "_none",
+			RouterOutput: routerOutput,
+			Result:       nil,
+		}
+		return &StepResult{
+			ID:           rb.ID,
+			Agent:        resolvedAgent,
+			Status:       "short_circuited",
+			Output:       output,
+			Metrics:      StepMetrics{},
+			Attempts:     totalAttempts,
+			UsedFallback: usedFallback,
+		}
+	}
+
+	// ── Phase 3: Dispatch target (no retry) ──
+
+	agentResult, err := dispatchRouteTarget(target, resolvedInput, rb, ctx)
+	if err != nil {
+		return &StepResult{
+			ID:           rb.ID,
+			Agent:        resolvedAgent,
+			Status:       "error",
+			Metrics:      StepMetrics{},
+			Attempts:     totalAttempts,
+			UsedFallback: usedFallback,
+			Error:        err.Error(),
+		}
+	}
+
+	output := &RouteOutput{
+		Route:        chosenKey,
+		RouterOutput: routerOutput,
+		Result:       agentResult.Output,
+	}
+
+	return &StepResult{
+		ID:           rb.ID,
+		Agent:        resolvedAgent,
+		Status:       "success",
+		Output:       output,
+		Metrics:      agentResult.Metrics,
+		Attempts:     totalAttempts,
+		UsedFallback: usedFallback,
+	}
+}
+
+// executeRouterDecision invokes the router (deterministic or LLM) and returns
+// a map containing at least {"route": "<key>"}.
+func executeRouterDecision(routerDef *RouterDefinition, input map[string]interface{}, keys []string) (map[string]interface{}, error) {
+	if routerDef.Strategy == "deterministic" {
+		agentCompat := &AgentDefinition{
+			Name:        routerDef.Name,
+			Description: routerDef.Description,
+			Type:        "deterministic",
+			Handler:     routerDef.Handler,
+		}
+		result, err := ExecuteAgent(input, agentCompat)
+		if err != nil {
+			return nil, err
+		}
+		if m, ok := result.Output.(map[string]interface{}); ok {
+			return m, nil
+		}
+		return nil, fmt.Errorf("deterministic router returned non-map output")
+	}
+
+	// LLM strategy
+	inputParts := make([]string, 0, len(input))
+	for k, v := range input {
+		if s, ok := v.(string); ok {
+			inputParts = append(inputParts, k+": "+s)
+		} else {
+			inputParts = append(inputParts, fmt.Sprintf("%s: %v", k, v))
+		}
+	}
+	inputSummary := strings.Join(inputParts, "\n")
+
+	userMessage := inputSummary + "\n\n" +
+		"You must choose exactly one of the following routes: " + strings.Join(keys, ", ") + "\n" +
+		"If none of the routes apply, choose: _none\n" +
+		`Respond with a JSON object: { "route": "<chosen_key>" }`
+
+	result, err := CallLLM(LLMCallOptions{
+		Model:        routerDef.Model,
+		SystemPrompt: routerDef.Prompt,
+		UserContent:  userMessage,
+		Temperature:  routerDef.Temperature,
+		SchemaName:   "",
+		Provider:     routerDef.Provider,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if m, ok := result.Output.(map[string]interface{}); ok {
+		return m, nil
+	}
+	return nil, fmt.Errorf("LLM router returned non-map output")
+}
+
+// dispatchRouteTarget dispatches to the chosen route target:
+//   - string        → agent ID with pass-through input
+//   - map["route"]  → nested RouteBlock (recursive)
+//   - map["agent"]  → agent with explicit or pass-through input
+//   - map["workflow"] → call Orchestrate
+func dispatchRouteTarget(target interface{}, passThrough map[string]interface{}, rb *RouteBlock, ctx *ExecutionContext) (*AgentResult, error) {
+	// String → agent ID
+	if agentID, ok := target.(string); ok {
+		return InvokeAgent(agentID, passThrough)
+	}
+
+	targetMap, ok := target.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unknown route target type in route %s: %T", rb.ID, target)
+	}
+
+	// Nested route block
+	if nestedRaw, ok := targetMap["route"]; ok {
+		// Re-marshal and decode into RouteBlock
+		nestedRB, err := decodeRouteBlock(nestedRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode nested route block: %w", err)
+		}
+		nestedResult := executeRoute(nestedRB, ctx)
+		return &AgentResult{
+			Output:  nestedResult.Output,
+			Metrics: nestedResult.Metrics,
+		}, nil
+	}
+
+	// Agent with explicit input
+	if agentID, ok := targetMap["agent"].(string); ok {
+		var agentInput map[string]interface{}
+		if inputRaw, hasInput := targetMap["input"]; hasInput {
+			if inputMap, ok := inputRaw.(map[string]interface{}); ok {
+				agentInput = ResolveInputs(inputMap, ctx)
+			}
+		}
+		if agentInput == nil {
+			agentInput = passThrough
+		}
+		return InvokeAgent(agentID, agentInput)
+	}
+
+	// Workflow target
+	if wfName, ok := targetMap["workflow"].(string); ok {
+		var wfInput map[string]interface{}
+		if inputRaw, hasInput := targetMap["input"]; hasInput {
+			if inputMap, ok := inputRaw.(map[string]interface{}); ok {
+				wfInput = ResolveInputs(inputMap, ctx)
+			}
+		}
+		if wfInput == nil {
+			wfInput = passThrough
+		}
+		envelope, err := Orchestrate(wfName, wfInput)
+		if err != nil {
+			return nil, err
+		}
+		return &AgentResult{
+			Output: envelope.Result,
+			Metrics: StepMetrics{
+				LatencyMs:    envelope.Metrics["total_latency_ms"].(float64),
+				InputTokens:  toInt(envelope.Metrics["total_input_tokens"]),
+				OutputTokens: toInt(envelope.Metrics["total_output_tokens"]),
+			},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("unknown route target type in route %s: %v", rb.ID, targetMap)
+}
+
+// routeKeys returns the valid (non-_none) keys from a RouteBlock's routes map.
+func routeKeys(rb *RouteBlock) []string {
+	keys := make([]string, 0, len(rb.Routes))
+	for k := range rb.Routes {
+		if k != "_none" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// decodeRouteBlock converts a raw interface{} (from YAML map) into a *RouteBlock.
+func decodeRouteBlock(raw interface{}) (*RouteBlock, error) {
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("route block is not a map")
+	}
+	rb := &RouteBlock{}
+	if id, ok := m["id"].(string); ok {
+		rb.ID = id
+	}
+	if router, ok := m["router"].(string); ok {
+		rb.Router = router
+	}
+	if input, ok := m["input"].(map[string]interface{}); ok {
+		rb.Input = input
+	}
+	if routes, ok := m["routes"].(map[string]interface{}); ok {
+		rb.Routes = routes
+	}
+	if retryRaw, ok := m["retry"].(map[string]interface{}); ok {
+		rb.Retry = &RetryConfig{
+			MaxAttempts: toInt(retryRaw["max_attempts"]),
+			BackoffMs:   toInt(retryRaw["backoff_ms"]),
+		}
+	}
+	if fallbackRaw, ok := m["fallback"].(map[string]interface{}); ok {
+		rb.Fallback = &RouterFallbackConfig{}
+		if r, ok := fallbackRaw["router"].(string); ok {
+			rb.Fallback.Router = r
+		}
+		if cfg, ok := fallbackRaw["config"].(map[string]interface{}); ok {
+			rb.Fallback.Config = cfg
+		}
+	}
+	return rb, nil
+}
+
+// toInt safely converts interface{} to int.
+func toInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case int64:
+		return int(n)
+	}
+	return 0
 }
 
 func generateRequestID() string {
