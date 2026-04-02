@@ -165,22 +165,11 @@ module AgenticEngine
         @schemas[schema_name] = parsed
       end
 
-      private
-
-      # Parse a single step entry which may be a plain step, a parallel group,
-      # or a route block.
-      def parse_step_entry(entry)
-        if entry.key?("parallel")
-          ParallelGroup.new(
-            parallel: entry["parallel"].map { |s| build_step(s) }
-          )
-        elsif entry.key?("route")
-          RouteEntry.new(route: build_route_block(entry["route"]))
-        else
-          build_step(entry)
-        end
-      end
-
+      # Build a RouteBlock from a raw Hash (public so orchestrator can use it for
+      # nested route targets).
+      #
+      # @param raw [Hash]
+      # @return [RouteBlock]
       def build_route_block(raw)
         retry_config = if raw["retry"]
                          { max_attempts: raw["retry"]["max_attempts"], backoff_ms: raw["retry"]["backoff_ms"] }
@@ -197,6 +186,22 @@ module AgenticEngine
           retry:    retry_config,
           fallback: fallback
         )
+      end
+
+      private
+
+      # Parse a single step entry which may be a plain step, a parallel group,
+      # or a route block.
+      def parse_step_entry(entry)
+        if entry.key?("parallel")
+          ParallelGroup.new(
+            parallel: entry["parallel"].map { |s| build_step(s) }
+          )
+        elsif entry.key?("route")
+          RouteEntry.new(route: build_route_block(entry["route"]))
+        else
+          build_step(entry)
+        end
       end
 
       def build_step(raw)

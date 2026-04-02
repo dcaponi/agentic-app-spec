@@ -36,17 +36,30 @@ module AgenticEngine
 
         workflow_def.steps.each do |entry|
           if short_circuited
-            # Fill in skipped steps with defaults
-            skipped_steps = entry.is_a?(ParallelGroup) ? entry.parallel : [entry]
-            skipped_steps.each do |step|
-              default_output = short_circuit_defaults&.dig(step.id) || {}
+            if entry.is_a?(RouteEntry)
+              fill_route_skipped(entry.route, short_circuit_defaults, context, step_results)
+              total_metrics[:steps_skipped] += 1
+            elsif entry.is_a?(ParallelGroup)
+              entry.parallel.each do |step|
+                default_output = short_circuit_defaults&.dig(step.id) || {}
+                result = StepResult.new(
+                  id: step.id, agent: step.agent, status: "skipped",
+                  output: default_output,
+                  metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
+                )
+                step_results << result
+                context["steps"][step.id] = { "output" => default_output }
+                total_metrics[:steps_skipped] += 1
+              end
+            else
+              default_output = short_circuit_defaults&.dig(entry.id) || {}
               result = StepResult.new(
-                id: step.id, agent: step.agent, status: "skipped",
+                id: entry.id, agent: entry.agent, status: "skipped",
                 output: default_output,
                 metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
               )
               step_results << result
-              context["steps"][step.id] = { "output" => default_output }
+              context["steps"][entry.id] = { "output" => default_output }
               total_metrics[:steps_skipped] += 1
             end
             next
@@ -68,6 +81,18 @@ module AgenticEngine
                   @log.info("short_circuit:triggered", { step: result.id })
                 end
               end
+            end
+          elsif entry.is_a?(RouteEntry)
+            route_result = execute_route(entry.route, context)
+            context["steps"][entry.route.id] = { "output" => route_result.output }
+            step_results << route_result
+            accumulate_metrics!(total_metrics, route_result)
+
+            if route_result.status == "short_circuited"
+              short_circuited = true
+              none_target = entry.route.routes["_none"]
+              short_circuit_defaults = none_target.is_a?(Hash) ? (none_target["defaults"] || {}) : {}
+              @log.info("short_circuit:triggered", { route: entry.route.id })
             end
           else
             result = execute_step_with_retry(entry, context)
@@ -213,6 +238,243 @@ module AgenticEngine
           used_fallback: step.fallback ? true : false,
           error:         last_error&.message || "Unknown error"
         )
+      end
+
+      # Fill a skipped route block result when the workflow is short-circuited.
+      def fill_route_skipped(route_block, defaults, context, step_results)
+        default_output = defaults&.dig(route_block.id) || nil
+        @log.info("route:skipped", { route: route_block.id })
+        context["steps"][route_block.id] = { "output" => default_output }
+        step_results << StepResult.new(
+          id:      route_block.id,
+          agent:   "router:#{route_block.router}",
+          status:  "skipped",
+          output:  default_output,
+          metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
+        )
+      end
+
+      # Execute a route block: decide → handle _none → dispatch target.
+      #
+      # @param route_block [RouteBlock]
+      # @param context [Hash]
+      # @return [StepResult]
+      def execute_route(route_block, context)
+        max_attempts = route_block.retry ? route_block.retry[:max_attempts] : 1
+        backoff_ms   = route_block.retry ? route_block.retry[:backoff_ms] : 0
+
+        @log.info("route:start", {
+          route: route_block.id,
+          router: route_block.router,
+          route_keys: route_block.routes.keys,
+          max_attempts: max_attempts,
+          has_fallback: !!route_block.fallback
+        })
+
+        router_def     = Loader.load_router(route_block.router)
+        resolved_input = Resolver.resolve_inputs(route_block.input, context)
+        route_keys     = route_block.routes.keys.reject { |k| k == "_none" }
+
+        # ── Phase 1: Router decision with retry (+ optional fallback) ──
+
+        chosen_key    = nil
+        router_output = nil
+        used_fallback = false
+        total_attempts = 0
+        decided       = false
+        last_error    = nil
+
+        max_attempts.times do |attempt_index|
+          total_attempts = attempt_index + 1
+          @log.info("route:decision_attempt", { route: route_block.id, attempt: total_attempts, max: max_attempts })
+
+          begin
+            output = execute_router_decision(router_def, resolved_input, route_keys)
+            key = output.is_a?(Hash) ? (output["route"] || output[:route]) : nil
+            key = key.to_s
+
+            @log.info("route:decision", { route: route_block.id, chosen: key, attempt: total_attempts })
+
+            if key != "_none" && !route_block.routes.key?(key)
+              raise OrchestrationError,
+                    "Router \"#{route_block.router}\" returned invalid route key \"#{key}\". " \
+                    "Valid keys: #{(route_keys + ["_none"]).join(", ")}"
+            end
+
+            chosen_key    = key
+            router_output = output
+            decided       = true
+            break
+          rescue StandardError => e
+            last_error = e
+            @log.warn("route:decision_error", { route: route_block.id, attempt: total_attempts, error: e.message })
+            if attempt_index < max_attempts - 1
+              sleep_seconds = (backoff_ms * (attempt_index + 1)) / 1000.0
+              sleep(sleep_seconds) if sleep_seconds > 0
+            end
+          end
+        end
+
+        # Fallback router decision
+        if !decided && route_block.fallback
+          @log.info("route:fallback_decision", { route: route_block.id, fallback_router: route_block.fallback[:router] })
+          begin
+            fallback_def = Loader.load_router(route_block.fallback[:router])
+            merged_fallback = route_block.fallback[:config] ? fallback_def.dup.tap { |d|
+              route_block.fallback[:config].each { |k, v| d[k.to_sym] = v rescue nil }
+            } : fallback_def
+            output = execute_router_decision(merged_fallback, resolved_input, route_keys)
+            key = output.is_a?(Hash) ? (output["route"] || output[:route]) : nil
+            key = key.to_s
+
+            if key != "_none" && !route_block.routes.key?(key)
+              raise OrchestrationError, "Fallback router returned invalid key \"#{key}\""
+            end
+
+            chosen_key     = key
+            router_output  = output
+            used_fallback  = true
+            total_attempts += 1
+            decided        = true
+          rescue StandardError => e
+            last_error     = e
+            total_attempts += 1
+            @log.error("route:fallback_decision_error", { route: route_block.id, error: e.message })
+          end
+        end
+
+        unless decided
+          @log.error("route:decision_exhausted", { route: route_block.id, total_attempts: total_attempts })
+          return StepResult.new(
+            id:            route_block.id,
+            agent:         "router:#{route_block.router}",
+            status:        "error",
+            output:        nil,
+            metrics:       StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0),
+            attempts:      total_attempts,
+            used_fallback: !!route_block.fallback,
+            error:         last_error&.message || "Router decision failed"
+          )
+        end
+
+        resolved_agent = used_fallback ? "router:#{route_block.fallback[:router]}" : "router:#{route_block.router}"
+        target = route_block.routes[chosen_key]
+
+        # ── Phase 2: Handle _none → short_circuit ──
+
+        if chosen_key == "_none" || (target.is_a?(Hash) && target["short_circuit"])
+          route_out = RouteOutput.new(route: "_none", router_output: router_output, result: nil)
+          return StepResult.new(
+            id:            route_block.id,
+            agent:         resolved_agent,
+            status:        "short_circuited",
+            output:        route_out.to_h,
+            metrics:       StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0),
+            attempts:      total_attempts,
+            used_fallback: used_fallback
+          )
+        end
+
+        # ── Phase 3: Dispatch target (no retry) ──
+
+        dispatch_result = dispatch_route_target(target, resolved_input, route_block, context)
+        route_out = RouteOutput.new(route: chosen_key, router_output: router_output, result: dispatch_result[:output])
+
+        StepResult.new(
+          id:            route_block.id,
+          agent:         resolved_agent,
+          status:        "success",
+          output:        route_out.to_h,
+          metrics:       dispatch_result[:metrics],
+          attempts:      total_attempts,
+          used_fallback: used_fallback
+        )
+      end
+
+      # Execute the router decision, returning a hash with a "route" key.
+      #
+      # @param router_def [RouterDefinition]
+      # @param resolved_input [Hash]
+      # @param route_keys [Array<String>]
+      # @return [Hash] e.g. { "route" => "sports" }
+      def execute_router_decision(router_def, resolved_input, route_keys)
+        if router_def.strategy == "deterministic"
+          agent_compat = AgentDefinition.new(
+            name:        router_def.name,
+            description: router_def.description,
+            type:        "deterministic",
+            handler:     router_def.handler
+          )
+          result = Runner.execute_agent(resolved_input, agent_compat)
+          result[:output]
+        else
+          # LLM strategy
+          input_summary = resolved_input.map do |k, v|
+            "#{k}: #{v.is_a?(String) ? v : JSON.generate(v)}"
+          end.join("\n")
+
+          user_message =
+            "#{input_summary}\n\n" \
+            "You must choose exactly one of the following routes: #{route_keys.join(", ")}\n" \
+            "If none of the routes apply, choose: _none\n" \
+            "Respond with a JSON object: { \"route\": \"<chosen_key>\" }"
+
+          result = LLM.call_llm(
+            model:         router_def.model || "gpt-4.1-mini",
+            system_prompt: router_def.prompt || "",
+            user_content:  user_message,
+            temperature:   router_def.temperature || 0,
+            schema_name:   nil,
+            provider:      router_def.provider
+          )
+          result[:output]
+        end
+      end
+
+      # Dispatch to the chosen route target.
+      #
+      # @param target [String, Hash] the route target value from the routes map
+      # @param pass_through [Hash] resolved input from the route block
+      # @param route_block [RouteBlock]
+      # @param context [Hash]
+      # @return [Hash] { output:, metrics: }
+      def dispatch_route_target(target, pass_through, route_block, context)
+        if target.is_a?(String)
+          # String → agent ID with pass-through input
+          agent_def = Loader.load_agent(target)
+          Runner.execute_agent(pass_through, agent_def)
+
+        elsif target.is_a?(Hash) && target.key?("route")
+          # Nested route block
+          nested_block = Loader.build_route_block(target["route"])
+          nested_result = execute_route(nested_block, context)
+          {
+            output:  nested_result.output,
+            metrics: nested_result.metrics
+          }
+
+        elsif target.is_a?(Hash) && target.key?("agent")
+          # Agent with explicit or pass-through input
+          agent_def  = Loader.load_agent(target["agent"])
+          agent_input = target["input"] ? Resolver.resolve_inputs(target["input"], context) : pass_through
+          Runner.execute_agent(agent_input, agent_def)
+
+        elsif target.is_a?(Hash) && target.key?("workflow")
+          # Workflow target
+          wf_input = target["input"] ? Resolver.resolve_inputs(target["input"], context) : pass_through
+          envelope = orchestrate(target["workflow"], wf_input)
+          {
+            output:  envelope[:result],
+            metrics: {
+              latency_ms:    envelope.dig(:metrics, :total_latency_ms) || 0,
+              input_tokens:  envelope.dig(:metrics, :total_input_tokens) || 0,
+              output_tokens: envelope.dig(:metrics, :total_output_tokens) || 0
+            }
+          }
+
+        else
+          raise OrchestrationError, "Unknown route target type in route #{route_block.id}: #{target.inspect}"
+        end
       end
 
       # Evaluate a short-circuit condition string.
