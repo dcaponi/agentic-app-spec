@@ -1,6 +1,6 @@
 {
   "name": "agentic-app-engine",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Runtime engine for agentic workflows — agent/workflow orchestration with retry, fallback, parallel execution, and short-circuit support.",
   "type": "module",
   "license": "MIT",
