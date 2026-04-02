@@ -58,7 +58,7 @@ class WorkflowDefinition:
     description: str = ""
     version: str = ""
     input: dict[str, Any] = field(default_factory=dict)
-    steps: list[WorkflowStep | ParallelGroup] = field(default_factory=list)
+    steps: list[WorkflowStep | ParallelGroup | RouteEntry] = field(default_factory=list)
     output: dict[str, str] = field(default_factory=dict)
 
 
@@ -79,6 +79,49 @@ class AgentDefinition:
     handler: str = ""
     input: dict[str, Any] = field(default_factory=dict)
     system_prompt: str = ""
+
+
+@dataclass
+class RouterDefinition:
+    """Parsed router YAML definition."""
+
+    name: str = ""
+    description: str = ""
+    strategy: str = "llm"  # "llm" or "deterministic"
+    provider: str = ""
+    model: str = ""
+    temperature: float = 0.0
+    handler: str = ""
+    prompt: str = ""
+    input: dict[str, Any] | None = None
+
+
+@dataclass
+class RouteBlock:
+    """A single routing step within a workflow."""
+
+    id: str = ""
+    router: str = ""
+    input: dict[str, str] = field(default_factory=dict)
+    routes: dict[str, Any] = field(default_factory=dict)  # values are str | dict with agent/workflow/route/_none
+    retry: RetryConfig | None = None
+    fallback: dict[str, Any] | None = None  # {"router": str, "config": dict}
+
+
+@dataclass
+class RouteEntry:
+    """Wrapper that marks a workflow step as a route block."""
+
+    route: RouteBlock = field(default_factory=RouteBlock)
+
+
+@dataclass
+class RouteOutput:
+    """Output produced by a completed route execution."""
+
+    route: str = ""
+    router_output: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
 
 
 @dataclass
