@@ -6,7 +6,20 @@ import sys
 import os
 
 # Set project root so the engine finds agents/workflows/routers here
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+project_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(project_dir)
+
+# Load .env file
+env_path = os.path.join(project_dir, ".env")
+if os.path.exists(env_path):
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if value and key not in os.environ:
+                    os.environ[key] = value
 
 from agentic_engine import orchestrate
 

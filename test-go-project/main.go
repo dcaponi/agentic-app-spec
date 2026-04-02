@@ -1,18 +1,45 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	engine "github.com/dcaponi/agentic-app-spec/runtime/go"
 )
 
+func loadEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if value != "" && os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
+}
+
 func main() {
+	loadEnv(".env")
+
 	engine.RegisterHandler("product_fetch", productFetchHandler)
 	engine.RegisterHandler("quality_scoring", qualityScoringHandler)
 
