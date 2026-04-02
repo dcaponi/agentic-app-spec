@@ -18,6 +18,7 @@ import { loadWorkflow, loadAllAgents, loadAgent, loadRouter } from './loader.js'
 import { executeAgent } from './runner.js';
 import { resolveInputs, resolveOutputs } from './resolver.js';
 import { createLogger, serializeError } from './logger.js';
+import { callLLM } from './llm.js';
 
 const log = createLogger('orchestrator');
 
@@ -635,7 +636,6 @@ async function executeRouterDecision(
 	}
 
 	// LLM strategy
-	const { callLLM } = await import('./llm.js');
 	const inputSummary = Object.entries(resolvedInput)
 		.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
 		.join('\n');
