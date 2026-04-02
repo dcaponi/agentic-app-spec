@@ -1,0 +1,10 @@
+name: Food Router
+description: Decides if a grocery item is food or non-food
+strategy: llm
+model: gpt-4.1-mini
+temperature: 0
+
+input:
+  item_name:
+    type: string
+    required: true

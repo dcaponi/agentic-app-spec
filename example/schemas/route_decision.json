@@ -1,0 +1,15 @@
+{
+  "name": "route_decision",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "required": ["route"],
+    "properties": {
+      "route": {
+        "type": "string",
+        "description": "The chosen route key"
+      }
+    },
+    "additionalProperties": false
+  }
+}
