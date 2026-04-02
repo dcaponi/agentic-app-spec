@@ -1,0 +1,12 @@
+name: Meat Classifier
+description: Provides detailed classification of a meat product
+type: llm
+model: gpt-4.1-mini
+temperature: 0.1
+schema: null
+user_message: "Classify this meat product in detail.\n\nItem: {{item_name}}\n\nProvide a JSON response with: protein_type (beef, pork, poultry, fish, seafood, other), cut (specific cut or preparation), is_frozen (boolean), is_processed (boolean), cooking_methods (array of suggested methods)."
+
+input:
+  item_name:
+    type: string
+    required: true

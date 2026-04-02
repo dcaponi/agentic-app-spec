@@ -1,0 +1,36 @@
+name: grocery-classify
+version: "1.0"
+description: Classifies grocery items through a hierarchical routing tree
+
+input:
+  item_name:
+    type: string
+    required: true
+
+steps:
+  - route:
+      id: classify
+      router: food-router
+      input:
+        item_name: $.input.item_name
+      routes:
+        food:
+          route:
+            id: food_sub
+            router: food-subtype-router
+            input:
+              item_name: $.input.item_name
+            routes:
+              meat: classify-meat
+              vegetable: classify-vegetable
+              canned: classify-canned
+              _none:
+                short_circuit: true
+                defaults: {}
+        non_food: classify-non-food
+        _none:
+          short_circuit: true
+          defaults: {}
+
+output:
+  classification: $.steps.classify.output

@@ -1,0 +1,12 @@
+name: Canned Food Classifier
+description: Provides detailed classification of a canned or jarred food product
+type: llm
+model: gpt-4.1-mini
+temperature: 0.1
+schema: null
+user_message: "Classify this canned/jarred food product in detail.\n\nItem: {{item_name}}\n\nProvide a JSON response with: content_type (what is inside), container (can, jar, pouch), is_ready_to_eat (boolean), shelf_life_months (estimated), common_uses (array of typical uses)."
+
+input:
+  item_name:
+    type: string
+    required: true
