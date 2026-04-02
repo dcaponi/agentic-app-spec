@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import YAML from 'yaml';
-import type { AgentDefinition, WorkflowDefinition, WorkflowSummary, JsonSchemaObject } from './types.js';
+import type { AgentDefinition, WorkflowDefinition, WorkflowSummary, JsonSchemaObject, RouterDefinition } from './types.js';
 import { createLogger, serializeError } from './logger.js';
 
 const log = createLogger('loader');
@@ -18,6 +18,7 @@ export function setProjectRoot(dir: string): void {
 	agentCache.clear();
 	workflowCache.clear();
 	jsonSchemaCache.clear();
+	routerCache.clear();
 }
 
 /** Get the current project root directory. */
@@ -37,11 +38,16 @@ function schemasDir(): string {
 	return join(ROOT, 'schemas');
 }
 
+function routersDir(): string {
+	return join(ROOT, 'routers');
+}
+
 // ── Caches (lazy-loaded, process-scoped) ──
 
 const agentCache = new Map<string, AgentDefinition>();
 const workflowCache = new Map<string, WorkflowDefinition>();
 const jsonSchemaCache = new Map<string, JsonSchemaObject>();
+const routerCache = new Map<string, RouterDefinition>();
 
 // ── Agent loading ──
 
@@ -124,6 +130,62 @@ export function loadAllAgents(): Map<string, AgentDefinition> {
 		}
 	}
 	return new Map(agentCache);
+}
+
+// ── Router loading ──
+
+export function loadRouter(routerId: string): RouterDefinition {
+	const cached = routerCache.get(routerId);
+	if (cached) return cached;
+
+	const dir = join(routersDir(), routerId);
+	log.info(`Loading router: ${routerId}`, { path: dir });
+
+	if (!existsSync(dir)) {
+		const rd = routersDir();
+		log.error(`Router directory not found: ${routerId}`, {
+			expected_path: dir,
+			routers_dir_exists: existsSync(rd),
+			available_routers: existsSync(rd)
+				? readdirSync(rd, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
+				: [],
+		});
+		throw new Error(`Router not found: ${routerId}. Directory does not exist: ${dir}`);
+	}
+
+	const configPath = join(dir, 'router.yaml');
+	if (!existsSync(configPath)) {
+		log.error(`router.yaml not found for router: ${routerId}`, { expected_path: configPath });
+		throw new Error(`router.yaml not found at ${configPath}`);
+	}
+
+	let config: RouterDefinition;
+	try {
+		config = YAML.parse(readFileSync(configPath, 'utf-8'));
+	} catch (err) {
+		log.error(`Failed to parse router.yaml for: ${routerId}`, {
+			path: configPath,
+			error: serializeError(err).message,
+		});
+		throw new Error(`Failed to parse ${configPath}: ${serializeError(err).message}`);
+	}
+
+	const promptPath = join(dir, 'prompt.md');
+	if (existsSync(promptPath)) {
+		config.prompt = readFileSync(promptPath, 'utf-8').trim();
+		log.debug(`Loaded prompt.md for router ${routerId}`, { prompt_length: config.prompt.length });
+	} else if (config.strategy === 'llm') {
+		log.warn(`LLM router ${routerId} has no prompt.md — system prompt will be empty`, { path: promptPath });
+	}
+
+	log.info(`Router loaded: ${routerId}`, {
+		strategy: config.strategy,
+		model: config.model,
+		has_prompt: !!config.prompt,
+	});
+
+	routerCache.set(routerId, config);
+	return config;
 }
 
 // ── Workflow loading ──
@@ -228,5 +290,6 @@ export function clearCaches(): void {
 	agentCache.clear();
 	workflowCache.clear();
 	jsonSchemaCache.clear();
+	routerCache.clear();
 	log.info('All caches cleared');
 }
