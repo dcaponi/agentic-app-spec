@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .llm import call_llm
-from .loader import load_agent, load_router, load_workflow
+from .loader import load_agent, load_routing_agent, load_workflow
 from .logger import create_logger, serialize_error
 from .resolver import resolve_inputs, resolve_outputs
 from .runner import execute_agent
@@ -28,7 +28,7 @@ from .types import (
     RouteBlock,
     RouteEntry,
     RouteOutput,
-    RouterDefinition,
+    RoutingAgentDefinition,
     StepMetrics,
     StepResult,
     WorkflowStep,
@@ -348,7 +348,7 @@ def _fill_route_skipped(
     context.steps[route_block.id] = {"output": default_output}
     sr = StepResult(
         step_id=route_block.id,
-        agent=f"router:{route_block.router}",
+        agent=f"routing-agent:{route_block.routing_agent}",
         output=default_output,
         metrics=StepMetrics(),
         retries=0,
@@ -378,13 +378,13 @@ async def _execute_route(
     log.info(
         "Route starting",
         step_id=route_block.id,
-        router=route_block.router,
+        routing_agent=route_block.routing_agent,
         route_keys=list(route_block.routes.keys()),
         max_attempts=max_attempts,
         has_fallback=route_block.fallback is not None,
     )
 
-    router_def = load_router(route_block.router)
+    routing_agent_def = load_routing_agent(route_block.routing_agent)
     resolved_input = resolve_inputs(route_block.input, context)
     route_keys = [k for k in route_block.routes.keys() if k != "_none"]
 
@@ -401,19 +401,19 @@ async def _execute_route(
         total_attempts = attempt
         log.info("Route decision attempt", step_id=route_block.id, attempt=attempt, max_attempts=max_attempts)
         try:
-            output = await _execute_router_decision(router_def, resolved_input, route_keys)
+            output = await _execute_routing_agent_decision(routing_agent_def, resolved_input, route_keys)
             key = output.get("route") if isinstance(output, dict) else None
 
             if not isinstance(key, str):
                 raise ValueError(
-                    f"Router '{route_block.router}' did not return a string 'route' key; got: {output!r}"
+                    f"Routing agent '{route_block.routing_agent}' did not return a string 'route' key; got: {output!r}"
                 )
 
             log.info("Route decision made", step_id=route_block.id, chosen_key=key, attempt=attempt)
 
             if key != "_none" and key not in route_block.routes:
                 raise ValueError(
-                    f"Router '{route_block.router}' returned invalid route key '{key}'. "
+                    f"Routing agent '{route_block.routing_agent}' returned invalid route key '{key}'. "
                     f"Valid keys: {[*route_keys, '_none']}"
                 )
 
@@ -436,49 +436,50 @@ async def _execute_route(
 
     # Fallback decision (if primary failed)
     if not decided and route_block.fallback:
-        fallback_router_id = route_block.fallback.get("router", "")
+        fallback_routing_agent_id = route_block.fallback.get("routing_agent", "")
         fallback_config = route_block.fallback.get("config", {})
         log.info(
-            "Route trying fallback router for decision",
+            "Route trying fallback routing agent for decision",
             step_id=route_block.id,
-            fallback_router=fallback_router_id,
+            fallback_routing_agent=fallback_routing_agent_id,
         )
         try:
-            fallback_def = load_router(fallback_router_id)
-            # Merge fallback config overrides onto the router definition
-            merged_fallback = RouterDefinition(
+            fallback_def = load_routing_agent(fallback_routing_agent_id)
+            # Merge fallback config overrides onto the routing agent definition
+            merged_fallback = RoutingAgentDefinition(
                 name=fallback_def.name,
                 description=fallback_def.description,
                 strategy=fallback_config.get("strategy", fallback_def.strategy),
-                provider=fallback_config.get("provider", fallback_def.provider),
                 model=fallback_config.get("model", fallback_def.model),
                 temperature=float(fallback_config.get("temperature", fallback_def.temperature)),
                 handler=fallback_config.get("handler", fallback_def.handler),
                 prompt=fallback_config.get("prompt", fallback_def.prompt),
                 input=fallback_def.input,
+                base_url=fallback_config.get("base_url", fallback_def.base_url),
+                api_key_env=fallback_config.get("api_key_env", fallback_def.api_key_env),
             )
-            output = await _execute_router_decision(merged_fallback, resolved_input, route_keys)
+            output = await _execute_routing_agent_decision(merged_fallback, resolved_input, route_keys)
             key = output.get("route") if isinstance(output, dict) else None
 
             if not isinstance(key, str):
                 raise ValueError(
-                    f"Fallback router '{fallback_router_id}' did not return a string 'route' key; got: {output!r}"
+                    f"Fallback routing agent '{fallback_routing_agent_id}' did not return a string 'route' key; got: {output!r}"
                 )
 
             if key != "_none" and key not in route_block.routes:
-                raise ValueError(f"Fallback router returned invalid key '{key}'")
+                raise ValueError(f"Fallback routing agent returned invalid key '{key}'")
 
             chosen_key = key
             router_output = output if isinstance(output, dict) else {"route": key}
             used_fallback = True
             total_attempts = max_attempts + 1
             decided = True
-            log.info("Route fallback decision made", step_id=route_block.id, chosen_key=key)
+            log.info("Route fallback routing agent decision made", step_id=route_block.id, chosen_key=key)
         except Exception as exc:
             last_error = exc
             total_attempts = max_attempts + 1
             log.error(
-                "Route fallback decision also failed",
+                "Route fallback routing agent decision also failed",
                 step_id=route_block.id,
                 error=str(exc),
             )
@@ -491,7 +492,7 @@ async def _execute_route(
             total_attempts=total_attempts,
             error=error_msg,
         )
-        resolved_agent = f"router:{route_block.router}"
+        resolved_agent = f"routing-agent:{route_block.routing_agent}"
         return StepResult(
             step_id=route_block.id,
             agent=resolved_agent,
@@ -503,8 +504,8 @@ async def _execute_route(
         )
 
     resolved_agent = (
-        f"router:{route_block.fallback['router']}" if used_fallback and route_block.fallback
-        else f"router:{route_block.router}"
+        f"routing-agent:{route_block.fallback['routing_agent']}" if used_fallback and route_block.fallback
+        else f"routing-agent:{route_block.routing_agent}"
     )
     target = route_block.routes.get(chosen_key)  # type: ignore[arg-type]
 
@@ -560,19 +561,19 @@ async def _execute_route(
     )
 
 
-async def _execute_router_decision(
-    router_def: RouterDefinition,
+async def _execute_routing_agent_decision(
+    routing_agent_def: RoutingAgentDefinition,
     resolved_input: dict[str, Any],
     route_keys: list[str],
 ) -> dict[str, Any]:
-    """Call the router and return its raw output dict (must contain ``route`` key)."""
-    if router_def.strategy == "deterministic":
+    """Call the routing agent and return its raw output dict (must contain ``route`` key)."""
+    if routing_agent_def.strategy == "deterministic":
         # Build an AgentDefinition-compatible object for execute_agent
         agent_compat = AgentDefinition(
-            name=router_def.name,
-            description=router_def.description,
+            name=routing_agent_def.name,
+            description=routing_agent_def.description,
             type="deterministic",
-            handler=router_def.handler,
+            handler=routing_agent_def.handler,
         )
         result = await execute_agent(resolved_input, agent_compat)
         output = result.output
@@ -591,12 +592,13 @@ async def _execute_router_decision(
     )
 
     output, _metrics = await call_llm(
-        model=router_def.model or "gpt-4.1-mini",
-        system_prompt=router_def.prompt or "",
+        model=routing_agent_def.model or "gpt-4.1-mini",
+        system_prompt=routing_agent_def.prompt or "",
         user_content=user_message,
-        temperature=router_def.temperature,
+        temperature=routing_agent_def.temperature,
         schema_name=None,
-        provider=router_def.provider,
+        base_url=routing_agent_def.base_url,
+        api_key_env=routing_agent_def.api_key_env,
     )
     return output if isinstance(output, dict) else {"route": output}
 
@@ -654,7 +656,7 @@ async def _dispatch_route_target(
             )
         nested_block = RouteBlock(
             id=nested_raw.get("id", ""),
-            router=nested_raw.get("router", ""),
+            routing_agent=nested_raw.get("routing_agent", ""),
             input=nested_raw.get("input", {}),
             routes=nested_raw.get("routes", {}),
             retry=nested_retry,

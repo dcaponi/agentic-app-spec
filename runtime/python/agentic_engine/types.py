@@ -69,7 +69,6 @@ class AgentDefinition:
     name: str = ""
     description: str = ""
     type: str = ""  # "llm" or "deterministic"
-    provider: str = ""  # "openai" or "anthropic"; auto-detected from model if empty
     model: str = ""
     temperature: float = 0.0
     input_type: str = "text"
@@ -79,21 +78,24 @@ class AgentDefinition:
     handler: str = ""
     input: dict[str, Any] = field(default_factory=dict)
     system_prompt: str = ""
+    base_url: str = ""
+    api_key_env: str = ""
 
 
 @dataclass
-class RouterDefinition:
-    """Parsed router YAML definition."""
+class RoutingAgentDefinition:
+    """Parsed routing-agent YAML definition."""
 
     name: str = ""
     description: str = ""
     strategy: str = "llm"  # "llm" or "deterministic"
-    provider: str = ""
     model: str = ""
     temperature: float = 0.0
     handler: str = ""
     prompt: str = ""
     input: dict[str, Any] | None = None
+    base_url: str = ""
+    api_key_env: str = ""
 
 
 @dataclass
@@ -101,11 +103,11 @@ class RouteBlock:
     """A single routing step within a workflow."""
 
     id: str = ""
-    router: str = ""
+    routing_agent: str = ""
     input: dict[str, str] = field(default_factory=dict)
     routes: dict[str, Any] = field(default_factory=dict)  # values are str | dict with agent/workflow/route/_none
     retry: RetryConfig | None = None
-    fallback: dict[str, Any] | None = None  # {"router": str, "config": dict}
+    fallback: dict[str, Any] | None = None  # {"routing_agent": str, "config": dict}
 
 
 @dataclass

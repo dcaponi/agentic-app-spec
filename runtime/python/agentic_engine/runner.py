@@ -65,7 +65,8 @@ async def execute_agent(
     overrides = config_overrides or {}
     model = overrides.get("model", agent_def.model)
     temperature = float(overrides.get("temperature", agent_def.temperature))
-    provider = overrides.get("provider", agent_def.provider)
+    base_url = overrides.get("base_url", agent_def.base_url)
+    api_key_env = overrides.get("api_key_env", agent_def.api_key_env)
 
     if agent_def.type == "deterministic":
         return await _run_deterministic(agent_def.handler, input_data)
@@ -75,7 +76,8 @@ async def execute_agent(
             input_data=input_data,
             model=model,
             temperature=temperature,
-            provider=provider,
+            base_url=base_url,
+            api_key_env=api_key_env,
         )
     else:
         raise ValueError(f"Unknown agent type: {agent_def.type}")
@@ -118,7 +120,8 @@ async def _run_llm(
     input_data: dict[str, Any],
     model: str,
     temperature: float,
-    provider: str = "",
+    base_url: str = "",
+    api_key_env: str = "",
 ) -> AgentResult:
     """Build the user message from the template and call the LLM."""
     user_message = resolve_template(agent_def.user_message, input_data)
@@ -131,7 +134,8 @@ async def _run_llm(
         schema_name=agent_def.schema,
         input_type=agent_def.input_type,
         image_detail=agent_def.image_detail,
-        provider=provider,
+        base_url=base_url,
+        api_key_env=api_key_env,
     )
 
     return AgentResult(output=output, metrics=metrics)

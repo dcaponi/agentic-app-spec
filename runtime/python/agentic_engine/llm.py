@@ -8,6 +8,7 @@ as text and base64-image inputs.
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any
 
@@ -41,19 +42,6 @@ def _get_anthropic_client() -> AsyncAnthropic:
 
 
 # ---------------------------------------------------------------------------
-# Provider detection
-# ---------------------------------------------------------------------------
-
-def _detect_provider(model: str, explicit: str = "") -> str:
-    """Return 'openai' or 'anthropic' based on model name or explicit override."""
-    if explicit in ("openai", "anthropic"):
-        return explicit
-    if model.startswith("claude-"):
-        return "anthropic"
-    return "openai"
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -65,7 +53,8 @@ async def call_llm(
     schema_name: str | None = None,
     input_type: str = "text",
     image_detail: str = "auto",
-    provider: str = "",
+    base_url: str = "",
+    api_key_env: str = "",
 ) -> tuple[dict[str, Any], StepMetrics]:
     """Call an LLM and return ``(parsed_output, metrics)``.
 
@@ -88,21 +77,43 @@ async def call_llm(
     image_detail:
         Vision detail level (``"low"``, ``"high"``, ``"auto"``).  Only used
         when *input_type* is ``"image"``.
-    provider:
-        ``"openai"`` or ``"anthropic"``.  If empty, auto-detected from *model*.
+    base_url:
+        Optional base URL for an OpenAI-compatible API endpoint.
+    api_key_env:
+        Environment variable name to read the API key from when *base_url* is
+        set.  If empty (and base_url is set), ``"not-needed"`` is used.
     """
-    resolved_provider = _detect_provider(model, provider)
-
-    log.info(
-        "Calling LLM",
-        provider=resolved_provider,
-        model=model,
-        schema_name=schema_name,
-        temperature=temperature,
-        input_type=input_type,
-    )
-
-    if resolved_provider == "anthropic":
+    if base_url:
+        api_key = os.environ.get(api_key_env, "not-needed") if api_key_env else "not-needed"
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        log.info(
+            "Calling LLM",
+            provider="openai-compatible",
+            base_url=base_url,
+            model=model,
+            schema_name=schema_name,
+            temperature=temperature,
+            input_type=input_type,
+        )
+        return await _call_openai(
+            model=model,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            temperature=temperature,
+            schema_name=schema_name,
+            input_type=input_type,
+            image_detail=image_detail,
+            client=client,
+        )
+    elif model.startswith("claude-"):
+        log.info(
+            "Calling LLM",
+            provider="anthropic",
+            model=model,
+            schema_name=schema_name,
+            temperature=temperature,
+            input_type=input_type,
+        )
         return await _call_anthropic(
             model=model,
             system_prompt=system_prompt,
@@ -112,15 +123,24 @@ async def call_llm(
             input_type=input_type,
             image_detail=image_detail,
         )
-    return await _call_openai(
-        model=model,
-        system_prompt=system_prompt,
-        user_content=user_content,
-        temperature=temperature,
-        schema_name=schema_name,
-        input_type=input_type,
-        image_detail=image_detail,
-    )
+    else:
+        log.info(
+            "Calling LLM",
+            provider="openai",
+            model=model,
+            schema_name=schema_name,
+            temperature=temperature,
+            input_type=input_type,
+        )
+        return await _call_openai(
+            model=model,
+            system_prompt=system_prompt,
+            user_content=user_content,
+            temperature=temperature,
+            schema_name=schema_name,
+            input_type=input_type,
+            image_detail=image_detail,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +155,9 @@ async def _call_openai(
     schema_name: str | None,
     input_type: str,
     image_detail: str,
+    client: AsyncOpenAI | None = None,
 ) -> tuple[dict[str, Any], StepMetrics]:
-    client = _get_openai_client()
+    client = client or _get_openai_client()
 
     # -- Build messages -------------------------------------------------------
     messages: list[dict[str, Any]] = []
