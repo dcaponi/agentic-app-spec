@@ -38,12 +38,13 @@ type AgentResult struct {
 	Metrics StepMetrics `json:"metrics"`
 }
 
-// AgentDefinition is parsed from agents/<id>/agent.yaml.
+// AgentDefinition is parsed from agentic-spec/agents/<id>/agent.yaml.
 type AgentDefinition struct {
 	Name        string                   `yaml:"name" json:"name"`
 	Description string                   `yaml:"description" json:"description"`
 	Type        string                   `yaml:"type" json:"type"` // "llm" or "deterministic"
-	Provider    string                   `yaml:"provider" json:"provider"` // "openai" or "anthropic"; auto-detected from model if empty
+	BaseURL     string                   `yaml:"base_url" json:"base_url"`
+	APIKeyEnv   string                   `yaml:"api_key_env" json:"api_key_env"`
 	Model       string                   `yaml:"model" json:"model"`
 	Temperature float64                  `yaml:"temperature" json:"temperature"`
 	InputType   string                   `yaml:"input_type" json:"input_type"`
@@ -95,7 +96,7 @@ type ParallelGroup struct {
 	Parallel []WorkflowStep `yaml:"parallel" json:"parallel"`
 }
 
-// WorkflowDefinition is parsed from workflows/<name>.yaml.
+// WorkflowDefinition is parsed from agentic-spec/workflows/<name>.yaml.
 type WorkflowDefinition struct {
 	Name        string                   `yaml:"name"`
 	Description string                   `yaml:"description"`
@@ -111,12 +112,13 @@ type ExecutionContext struct {
 	Steps map[string]map[string]interface{} // step_id -> {"output": value}
 }
 
-// RouterDefinition is parsed from routers/<id>/router.yaml.
-type RouterDefinition struct {
+// RoutingAgentDefinition is parsed from agentic-spec/routing-agents/<id>/routing-agent.yaml.
+type RoutingAgentDefinition struct {
 	Name        string                   `yaml:"name" json:"name"`
 	Description string                   `yaml:"description" json:"description"`
 	Strategy    string                   `yaml:"strategy" json:"strategy"` // "llm" or "deterministic"
-	Provider    string                   `yaml:"provider" json:"provider"`
+	BaseURL     string                   `yaml:"base_url" json:"base_url"`
+	APIKeyEnv   string                   `yaml:"api_key_env" json:"api_key_env"`
 	Model       string                   `yaml:"model" json:"model"`
 	Temperature float64                  `yaml:"temperature" json:"temperature"`
 	Handler     string                   `yaml:"handler" json:"handler"`
@@ -126,18 +128,18 @@ type RouterDefinition struct {
 
 // RouteBlock is a routing step in a workflow.
 type RouteBlock struct {
-	ID       string                 `yaml:"id" json:"id"`
-	Router   string                 `yaml:"router" json:"router"`
-	Input    map[string]interface{} `yaml:"input" json:"input"`
-	Routes   map[string]interface{} `yaml:"routes" json:"routes"`
-	Retry    *RetryConfig           `yaml:"retry" json:"retry"`
-	Fallback *RouterFallbackConfig  `yaml:"fallback" json:"fallback"`
+	ID           string                        `yaml:"id" json:"id"`
+	RoutingAgent string                        `yaml:"routing_agent" json:"routing_agent"`
+	Input        map[string]interface{}        `yaml:"input" json:"input"`
+	Routes       map[string]interface{}        `yaml:"routes" json:"routes"`
+	Retry        *RetryConfig                  `yaml:"retry" json:"retry"`
+	Fallback     *RoutingAgentFallbackConfig    `yaml:"fallback" json:"fallback"`
 }
 
-// RouterFallbackConfig identifies an alternate router to use when retries are exhausted.
-type RouterFallbackConfig struct {
-	Router string                 `yaml:"router" json:"router"`
-	Config map[string]interface{} `yaml:"config" json:"config"`
+// RoutingAgentFallbackConfig identifies an alternate routing agent to use when retries are exhausted.
+type RoutingAgentFallbackConfig struct {
+	RoutingAgent string                 `yaml:"routing_agent" json:"routing_agent"`
+	Config       map[string]interface{} `yaml:"config" json:"config"`
 }
 
 // RouteOutput is the output of a route step.

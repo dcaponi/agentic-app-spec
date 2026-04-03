@@ -11,15 +11,15 @@ import (
 )
 
 var (
-	agentCache    = map[string]*AgentDefinition{}
-	workflowCache = map[string]*WorkflowDefinition{}
-	schemaCache   = map[string]map[string]interface{}{}
-	routerCache   = map[string]*RouterDefinition{}
-	log           = NewLogger("loader")
+	agentCache        = map[string]*AgentDefinition{}
+	workflowCache     = map[string]*WorkflowDefinition{}
+	schemaCache       = map[string]map[string]interface{}{}
+	routingAgentCache = map[string]*RoutingAgentDefinition{}
+	log               = NewLogger("loader")
 )
 
 // FindProjectRoot walks up from the working directory looking for
-// agentic.config.yaml or an agents/ directory.
+// agentic.config.yaml, an agentic-spec/ directory, or an agents/ directory.
 func FindProjectRoot() string {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -27,6 +27,9 @@ func FindProjectRoot() string {
 	}
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "agentic.config.yaml")); err == nil {
+			return dir
+		}
+		if info, err := os.Stat(filepath.Join(dir, "agentic-spec")); err == nil && info.IsDir() {
 			return dir
 		}
 		if info, err := os.Stat(filepath.Join(dir, "agents")); err == nil && info.IsDir() {
@@ -43,14 +46,14 @@ func FindProjectRoot() string {
 	return cwd
 }
 
-// LoadAgent reads agents/<id>/agent.yaml and its optional prompt.md.
+// LoadAgent reads agentic-spec/agents/<id>/agent.yaml and its optional prompt.md.
 func LoadAgent(agentID string) (*AgentDefinition, error) {
 	if cached, ok := agentCache[agentID]; ok {
 		return cached, nil
 	}
 
 	root := FindProjectRoot()
-	agentDir := filepath.Join(root, "agents", agentID)
+	agentDir := filepath.Join(root, "agentic-spec", "agents", agentID)
 	yamlPath := filepath.Join(agentDir, "agent.yaml")
 
 	data, err := os.ReadFile(yamlPath)
@@ -74,10 +77,10 @@ func LoadAgent(agentID string) (*AgentDefinition, error) {
 	return &def, nil
 }
 
-// LoadAllAgents reads every agent under agents/.
+// LoadAllAgents reads every agent under agentic-spec/agents/.
 func LoadAllAgents() (map[string]*AgentDefinition, error) {
 	root := FindProjectRoot()
-	agentsDir := filepath.Join(root, "agents")
+	agentsDir := filepath.Join(root, "agentic-spec", "agents")
 
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
@@ -100,48 +103,48 @@ func LoadAllAgents() (map[string]*AgentDefinition, error) {
 	return result, nil
 }
 
-// LoadRouter reads routers/<id>/router.yaml and its optional prompt.md.
-func LoadRouter(routerID string) (*RouterDefinition, error) {
-	if cached, ok := routerCache[routerID]; ok {
+// LoadRoutingAgent reads agentic-spec/routing-agents/<id>/routing-agent.yaml and its optional prompt.md.
+func LoadRoutingAgent(routingAgentID string) (*RoutingAgentDefinition, error) {
+	if cached, ok := routingAgentCache[routingAgentID]; ok {
 		return cached, nil
 	}
 
 	root := FindProjectRoot()
-	routerDir := filepath.Join(root, "routers", routerID)
-	if _, err := os.Stat(routerDir); err != nil {
-		return nil, fmt.Errorf("router directory not found: %s", routerDir)
+	routingAgentDir := filepath.Join(root, "agentic-spec", "routing-agents", routingAgentID)
+	if _, err := os.Stat(routingAgentDir); err != nil {
+		return nil, fmt.Errorf("routing-agent directory not found: %s", routingAgentDir)
 	}
-	yamlPath := filepath.Join(routerDir, "router.yaml")
+	yamlPath := filepath.Join(routingAgentDir, "routing-agent.yaml")
 
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read router %s: %w", routerID, err)
+		return nil, fmt.Errorf("failed to read routing-agent %s: %w", routingAgentID, err)
 	}
 
-	var def RouterDefinition
+	var def RoutingAgentDefinition
 	if err := yaml.Unmarshal(data, &def); err != nil {
-		return nil, fmt.Errorf("failed to parse router %s YAML: %w", routerID, err)
+		return nil, fmt.Errorf("failed to parse routing-agent %s YAML: %w", routingAgentID, err)
 	}
 
 	// Load prompt.md if it exists
-	promptPath := filepath.Join(routerDir, "prompt.md")
+	promptPath := filepath.Join(routingAgentDir, "prompt.md")
 	if promptData, err := os.ReadFile(promptPath); err == nil {
 		def.Prompt = strings.TrimSpace(string(promptData))
 	}
 
-	routerCache[routerID] = &def
-	log.Debug("loaded router", map[string]interface{}{"router": routerID})
+	routingAgentCache[routingAgentID] = &def
+	log.Debug("loaded routing-agent", map[string]interface{}{"routing_agent": routingAgentID})
 	return &def, nil
 }
 
-// LoadWorkflow reads workflows/<name>.yaml.
+// LoadWorkflow reads agentic-spec/workflows/<name>.yaml.
 func LoadWorkflow(name string) (*WorkflowDefinition, error) {
 	if cached, ok := workflowCache[name]; ok {
 		return cached, nil
 	}
 
 	root := FindProjectRoot()
-	yamlPath := filepath.Join(root, "workflows", name+".yaml")
+	yamlPath := filepath.Join(root, "agentic-spec", "workflows", name+".yaml")
 
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
@@ -203,14 +206,30 @@ func parseWorkflowYAML(data []byte) (*WorkflowDefinition, error) {
 			}
 			def.Steps = append(def.Steps, &pg)
 		} else if isRoute {
-			// The YAML has a top-level "route:" key whose value is the RouteBlock
+			// The YAML has a top-level "route:" key whose value is the RouteBlock.
+			// Read routing_agent field from the inner map.
 			var wrapper struct {
-				Route RouteBlock `yaml:"route"`
+				Route struct {
+					ID           string                     `yaml:"id"`
+					RoutingAgent string                     `yaml:"routing_agent"`
+					Input        map[string]interface{}     `yaml:"input"`
+					Routes       map[string]interface{}     `yaml:"routes"`
+					Retry        *RetryConfig               `yaml:"retry"`
+					Fallback     *RoutingAgentFallbackConfig `yaml:"fallback"`
+				} `yaml:"route"`
 			}
 			if err := node.Decode(&wrapper); err != nil {
 				return nil, fmt.Errorf("step %d: failed to decode route block: %w", i, err)
 			}
-			def.Steps = append(def.Steps, &wrapper.Route)
+			rb := &RouteBlock{
+				ID:           wrapper.Route.ID,
+				RoutingAgent: wrapper.Route.RoutingAgent,
+				Input:        wrapper.Route.Input,
+				Routes:       wrapper.Route.Routes,
+				Retry:        wrapper.Route.Retry,
+				Fallback:     wrapper.Route.Fallback,
+			}
+			def.Steps = append(def.Steps, rb)
 		} else {
 			var ws WorkflowStep
 			if err := node.Decode(&ws); err != nil {
@@ -223,14 +242,14 @@ func parseWorkflowYAML(data []byte) (*WorkflowDefinition, error) {
 	return def, nil
 }
 
-// LoadSchema reads schemas/<name>.json and returns the parsed object.
+// LoadSchema reads agentic-spec/schemas/<name>.json and returns the parsed object.
 func LoadSchema(name string) (map[string]interface{}, error) {
 	if cached, ok := schemaCache[name]; ok {
 		return cached, nil
 	}
 
 	root := FindProjectRoot()
-	jsonPath := filepath.Join(root, "schemas", name+".json")
+	jsonPath := filepath.Join(root, "agentic-spec", "schemas", name+".json")
 
 	data, err := os.ReadFile(jsonPath)
 	if err != nil {

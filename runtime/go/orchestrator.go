@@ -31,7 +31,7 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 
 	envelope := &WorkflowEnvelope{
 		Workflow:  wfDef.Name,
-		Version:  wfDef.Version,
+		Version:   wfDef.Version,
 		RequestID: generateRequestID(),
 		Timestamps: map[string]string{
 			"started_at": startTime.Format(time.RFC3339),
@@ -57,7 +57,7 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 					populateCtxFromDefaults(ctx, ps.ID, shortCircuitDefaults)
 				}
 			case *RouteBlock:
-				envelope.Steps = append(envelope.Steps, buildSkippedResult(s.ID, "router:"+s.Router, shortCircuitDefaults))
+				envelope.Steps = append(envelope.Steps, buildSkippedResult(s.ID, "routing-agent:"+s.RoutingAgent, shortCircuitDefaults))
 				populateCtxFromDefaults(ctx, s.ID, shortCircuitDefaults)
 			}
 			continue
@@ -140,7 +140,7 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 	}
 
 	orchLog.Info("workflow completed", map[string]interface{}{
-		"workflow":  wfDef.Name,
+		"workflow": wfDef.Name,
 		"status":   envelope.Status,
 		"latency":  envelope.Metrics["total_latency_ms"],
 	})
@@ -182,10 +182,10 @@ func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult
 
 		if err == nil {
 			return &StepResult{
-				ID:       step.ID,
-				Agent:    step.Agent,
-				Status:   "success",
-				Output:   agentResult.Output,
+				ID:     step.ID,
+				Agent:  step.Agent,
+				Status: "success",
+				Output: agentResult.Output,
 				Metrics: StepMetrics{
 					LatencyMs:    latency,
 					InputTokens:  agentResult.Metrics.InputTokens,
@@ -229,10 +229,10 @@ func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult
 
 		if err == nil {
 			return &StepResult{
-				ID:           step.ID,
-				Agent:        step.Fallback.Agent,
-				Status:       "success",
-				Output:       agentResult.Output,
+				ID:    step.ID,
+				Agent: step.Fallback.Agent,
+				Status: "success",
+				Output: agentResult.Output,
 				Metrics: StepMetrics{
 					LatencyMs:    latency,
 					InputTokens:  agentResult.Metrics.InputTokens,
@@ -359,7 +359,7 @@ func populateCtxFromDefaults(ctx *ExecutionContext, stepID string, defaults map[
 // ── Route execution engine ──
 
 // executeRoute executes a RouteBlock in three phases:
-// Phase 1: router decision with retry + fallback
+// Phase 1: routing-agent decision with retry + fallback
 // Phase 2: handle _none (short-circuit)
 // Phase 3: dispatch target (no retry)
 func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
@@ -374,18 +374,18 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 	}
 
 	orchLog.Info("route starting", map[string]interface{}{
-		"id":           rb.ID,
-		"router":       rb.Router,
-		"route_keys":   routeKeys(rb),
-		"max_attempts": maxAttempts,
-		"has_fallback": rb.Fallback != nil,
+		"id":             rb.ID,
+		"routing_agent":  rb.RoutingAgent,
+		"route_keys":     routeKeys(rb),
+		"max_attempts":   maxAttempts,
+		"has_fallback":   rb.Fallback != nil,
 	})
 
-	routerDef, err := LoadRouter(rb.Router)
+	routingAgentDef, err := LoadRoutingAgent(rb.RoutingAgent)
 	if err != nil {
 		return &StepResult{
 			ID:     rb.ID,
-			Agent:  "router:" + rb.Router,
+			Agent:  "routing-agent:" + rb.RoutingAgent,
 			Status: "error",
 			Error:  err.Error(),
 		}
@@ -397,7 +397,7 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 	// ── Phase 1: Decision with retry + fallback ──
 
 	var chosenKey string
-	var routerOutput map[string]interface{}
+	var routingAgentOutput map[string]interface{}
 	usedFallback := false
 	totalAttempts := 0
 	decided := false
@@ -410,17 +410,17 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 			"attempt": attempt,
 		})
 
-		output, err := executeRouterDecision(routerDef, resolvedInput, keys)
+		output, err := executeRoutingAgentDecision(routingAgentDef, resolvedInput, keys)
 		if err == nil {
 			key, _ := output["route"].(string)
 			if key != "_none" {
 				if _, exists := rb.Routes[key]; !exists {
-					err = fmt.Errorf("router %q returned invalid route key %q; valid: %v", rb.Router, key, append(keys, "_none"))
+					err = fmt.Errorf("routing-agent %q returned invalid route key %q; valid: %v", rb.RoutingAgent, key, append(keys, "_none"))
 				}
 			}
 			if err == nil {
 				chosenKey = key
-				routerOutput = output
+				routingAgentOutput = output
 				decided = true
 				orchLog.Info("route decision made", map[string]interface{}{
 					"id":    rb.ID,
@@ -444,12 +444,12 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 
 	// Fallback decision
 	if !decided && rb.Fallback != nil {
-		orchLog.Info("trying fallback router", map[string]interface{}{
-			"id":             rb.ID,
-			"fallback_router": rb.Fallback.Router,
+		orchLog.Info("trying fallback routing-agent", map[string]interface{}{
+			"id":                      rb.ID,
+			"fallback_routing_agent":  rb.Fallback.RoutingAgent,
 		})
 
-		fallbackDef, ferr := LoadRouter(rb.Fallback.Router)
+		fallbackDef, ferr := LoadRoutingAgent(rb.Fallback.RoutingAgent)
 		if ferr == nil {
 			// Merge fallback config overrides into a copy
 			mergedDef := *fallbackDef
@@ -468,17 +468,17 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 				}
 			}
 
-			output, ferr2 := executeRouterDecision(&mergedDef, resolvedInput, keys)
+			output, ferr2 := executeRoutingAgentDecision(&mergedDef, resolvedInput, keys)
 			if ferr2 == nil {
 				key, _ := output["route"].(string)
 				if key != "_none" {
 					if _, exists := rb.Routes[key]; !exists {
-						ferr2 = fmt.Errorf("fallback router returned invalid key %q", key)
+						ferr2 = fmt.Errorf("fallback routing-agent returned invalid key %q", key)
 					}
 				}
 				if ferr2 == nil {
 					chosenKey = key
-					routerOutput = output
+					routingAgentOutput = output
 					usedFallback = true
 					totalAttempts = maxAttempts + 1
 					decided = true
@@ -505,7 +505,7 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 		orchLog.Warn("route failed", map[string]interface{}{"id": rb.ID, "error": errMsg})
 		return &StepResult{
 			ID:           rb.ID,
-			Agent:        "router:" + rb.Router,
+			Agent:        "routing-agent:" + rb.RoutingAgent,
 			Status:       "error",
 			Metrics:      StepMetrics{},
 			Attempts:     totalAttempts,
@@ -514,9 +514,9 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 		}
 	}
 
-	resolvedAgent := "router:" + rb.Router
+	resolvedAgent := "routing-agent:" + rb.RoutingAgent
 	if usedFallback {
-		resolvedAgent = "router:" + rb.Fallback.Router
+		resolvedAgent = "routing-agent:" + rb.Fallback.RoutingAgent
 	}
 
 	// ── Phase 2: Handle _none → short_circuited ──
@@ -534,7 +534,7 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 	if isNone {
 		output := &RouteOutput{
 			Route:        "_none",
-			RouterOutput: routerOutput,
+			RouterOutput: routingAgentOutput,
 			Result:       nil,
 		}
 		return &StepResult{
@@ -565,7 +565,7 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 
 	output := &RouteOutput{
 		Route:        chosenKey,
-		RouterOutput: routerOutput,
+		RouterOutput: routingAgentOutput,
 		Result:       agentResult.Output,
 	}
 
@@ -580,15 +580,15 @@ func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
 	}
 }
 
-// executeRouterDecision invokes the router (deterministic or LLM) and returns
+// executeRoutingAgentDecision invokes the routing agent (deterministic or LLM) and returns
 // a map containing at least {"route": "<key>"}.
-func executeRouterDecision(routerDef *RouterDefinition, input map[string]interface{}, keys []string) (map[string]interface{}, error) {
-	if routerDef.Strategy == "deterministic" {
+func executeRoutingAgentDecision(routingAgentDef *RoutingAgentDefinition, input map[string]interface{}, keys []string) (map[string]interface{}, error) {
+	if routingAgentDef.Strategy == "deterministic" {
 		agentCompat := &AgentDefinition{
-			Name:        routerDef.Name,
-			Description: routerDef.Description,
+			Name:        routingAgentDef.Name,
+			Description: routingAgentDef.Description,
 			Type:        "deterministic",
-			Handler:     routerDef.Handler,
+			Handler:     routingAgentDef.Handler,
 		}
 		result, err := ExecuteAgent(input, agentCompat)
 		if err != nil {
@@ -597,7 +597,7 @@ func executeRouterDecision(routerDef *RouterDefinition, input map[string]interfa
 		if m, ok := result.Output.(map[string]interface{}); ok {
 			return m, nil
 		}
-		return nil, fmt.Errorf("deterministic router returned non-map output")
+		return nil, fmt.Errorf("deterministic routing-agent returned non-map output")
 	}
 
 	// LLM strategy
@@ -617,12 +617,13 @@ func executeRouterDecision(routerDef *RouterDefinition, input map[string]interfa
 		`Respond with a JSON object: { "route": "<chosen_key>" }`
 
 	result, err := CallLLM(LLMCallOptions{
-		Model:        routerDef.Model,
-		SystemPrompt: routerDef.Prompt,
+		Model:        routingAgentDef.Model,
+		SystemPrompt: routingAgentDef.Prompt,
 		UserContent:  userMessage,
-		Temperature:  routerDef.Temperature,
+		Temperature:  routingAgentDef.Temperature,
 		SchemaName:   "",
-		Provider:     routerDef.Provider,
+		BaseURL:      routingAgentDef.BaseURL,
+		APIKeyEnv:    routingAgentDef.APIKeyEnv,
 	})
 	if err != nil {
 		return nil, err
@@ -631,7 +632,7 @@ func executeRouterDecision(routerDef *RouterDefinition, input map[string]interfa
 	if m, ok := result.Output.(map[string]interface{}); ok {
 		return m, nil
 	}
-	return nil, fmt.Errorf("LLM router returned non-map output")
+	return nil, fmt.Errorf("LLM routing-agent returned non-map output")
 }
 
 // dispatchRouteTarget dispatches to the chosen route target:
@@ -728,8 +729,8 @@ func decodeRouteBlock(raw interface{}) (*RouteBlock, error) {
 	if id, ok := m["id"].(string); ok {
 		rb.ID = id
 	}
-	if router, ok := m["router"].(string); ok {
-		rb.Router = router
+	if ra, ok := m["routing_agent"].(string); ok {
+		rb.RoutingAgent = ra
 	}
 	if input, ok := m["input"].(map[string]interface{}); ok {
 		rb.Input = input
@@ -744,9 +745,9 @@ func decodeRouteBlock(raw interface{}) (*RouteBlock, error) {
 		}
 	}
 	if fallbackRaw, ok := m["fallback"].(map[string]interface{}); ok {
-		rb.Fallback = &RouterFallbackConfig{}
-		if r, ok := fallbackRaw["router"].(string); ok {
-			rb.Fallback.Router = r
+		rb.Fallback = &RoutingAgentFallbackConfig{}
+		if ra, ok := fallbackRaw["routing_agent"].(string); ok {
+			rb.Fallback.RoutingAgent = ra
 		}
 		if cfg, ok := fallbackRaw["config"].(map[string]interface{}); ok {
 			rb.Fallback.Config = cfg

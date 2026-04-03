@@ -87,7 +87,8 @@ func executeLLM(input map[string]interface{}, agentDef *AgentDefinition) (*Agent
 		UserContent:  userContent,
 		Temperature:  agentDef.Temperature,
 		SchemaName:   schemaName,
-		Provider:     agentDef.Provider,
+		BaseURL:      agentDef.BaseURL,
+		APIKeyEnv:    agentDef.APIKeyEnv,
 	})
 }
 

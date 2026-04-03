@@ -23,48 +23,55 @@ type LLMCallOptions struct {
 	UserContent  interface{} // string or []interface{} for multipart content
 	Temperature  float64
 	SchemaName   string // non-empty -> structured output; empty -> json_object/json mode
-	Provider     string // "openai" or "anthropic"; auto-detected from Model if empty
+	BaseURL      string // if set, use this endpoint (OpenAI-compatible)
+	APIKeyEnv    string // env var name for the API key when BaseURL is set
 }
 
 var llmLog = NewLogger("llm")
 
-// detectProvider returns "openai" or "anthropic" based on model name or explicit override.
-func detectProvider(model, explicit string) string {
-	if explicit == "openai" || explicit == "anthropic" {
-		return explicit
-	}
-	if strings.HasPrefix(model, "claude-") {
-		return "anthropic"
-	}
-	return "openai"
-}
-
-// CallLLM invokes the appropriate provider's API based on the provider setting.
+// CallLLM invokes the appropriate provider's API based on BaseURL, or auto-detects
+// from the model name (claude- -> Anthropic, otherwise OpenAI).
 func CallLLM(opts LLMCallOptions) (*AgentResult, error) {
-	provider := detectProvider(opts.Model, opts.Provider)
-
-	llmLog.Debug("calling LLM", map[string]interface{}{
-		"provider": provider,
-		"model":    opts.Model,
-		"schema":   opts.SchemaName,
-	})
-
-	if provider == "anthropic" {
+	if opts.BaseURL != "" {
+		apiKey := "not-needed"
+		if opts.APIKeyEnv != "" {
+			apiKey = os.Getenv(opts.APIKeyEnv)
+		}
+		llmLog.Debug("calling LLM (custom base_url)", map[string]interface{}{
+			"base_url": opts.BaseURL,
+			"model":    opts.Model,
+			"schema":   opts.SchemaName,
+		})
+		return callOpenAIWithURL(opts, apiKey, opts.BaseURL)
+	} else if strings.HasPrefix(opts.Model, "claude-") {
+		llmLog.Debug("calling LLM (anthropic)", map[string]interface{}{
+			"model":  opts.Model,
+			"schema": opts.SchemaName,
+		})
 		return callAnthropic(opts)
+	} else {
+		llmLog.Debug("calling LLM (openai)", map[string]interface{}{
+			"model":  opts.Model,
+			"schema": opts.SchemaName,
+		})
+		return callOpenAI(opts, os.Getenv("OPENAI_API_KEY"), openAIEndpoint)
 	}
-	return callOpenAI(opts)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // OpenAI implementation
 // ════════════════════════════════════════════════════════════════════════════
 
-func callOpenAI(opts LLMCallOptions) (*AgentResult, error) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
+// callOpenAI is a convenience wrapper that uses the default OpenAI endpoint.
+func callOpenAI(opts LLMCallOptions, apiKey, baseURL string) (*AgentResult, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY environment variable is not set")
 	}
+	return callOpenAIWithURL(opts, apiKey, baseURL)
+}
 
+// callOpenAIWithURL sends a request to any OpenAI-compatible endpoint.
+func callOpenAIWithURL(opts LLMCallOptions, apiKey, baseURL string) (*AgentResult, error) {
 	// Build messages
 	messages := []map[string]interface{}{
 		{"role": "system", "content": opts.SystemPrompt},
@@ -128,7 +135,7 @@ func callOpenAI(opts LLMCallOptions) (*AgentResult, error) {
 
 	start := time.Now()
 
-	req, err := http.NewRequest("POST", openAIEndpoint, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequest("POST", baseURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
