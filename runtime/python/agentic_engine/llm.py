@@ -345,8 +345,18 @@ async def _call_anthropic(
     if not raw_text:
         raw_text = "{}"
 
+    # Strip markdown code fences if present (Claude often wraps JSON in ```json ... ```)
+    stripped = raw_text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        # Remove first line (```json or ```) and last line (```)
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+
     try:
-        output = json.loads(raw_text)
+        output = json.loads(stripped)
     except json.JSONDecodeError:
         log.warn("Anthropic returned non-JSON content, wrapping as text", raw=raw_text[:200])
         output = {"raw": raw_text}
