@@ -8,7 +8,7 @@ lang: typescript
 outdir: src/generated
 
 # Agents directory (relative to project root)
-agents_dir: agents
+agents_dir: agentic-spec/agents
 
 # Workflows directory (relative to project root)
-workflows_dir: workflows
+workflows_dir: agentic-spec/workflows

@@ -10,14 +10,14 @@ input:
 steps:
   - route:
       id: classify
-      router: food-router
+      routing_agent: food-router
       input:
         item_name: $.input.item_name
       routes:
         food:
           route:
             id: food_sub
-            router: food-subtype-router
+            routing_agent: food-subtype-router
             input:
               item_name: $.input.item_name
             routes:
