@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Router Definition",
-  "description": "Schema for routers/<id>/router.yaml",
+  "title": "Routing Agent Definition",
+  "description": "Schema for agentic-spec/routing-agents/<id>/routing-agent.yaml",
   "type": "object",
   "required": ["name", "strategy"],
   "properties": {
@@ -18,10 +18,13 @@
       "enum": ["llm", "deterministic"],
       "description": "Decision mechanism"
     },
-    "provider": {
+    "base_url": {
       "type": "string",
-      "enum": ["openai", "anthropic"],
-      "description": "LLM provider. Auto-detected from model name if omitted."
+      "description": "API endpoint URL. When set, uses an OpenAI-compatible client pointed at this URL."
+    },
+    "api_key_env": {
+      "type": "string",
+      "description": "Name of the environment variable holding the API key (e.g., DEEPSEEK_API_KEY)."
     },
     "model": {
       "type": "string",

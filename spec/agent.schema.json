@@ -18,10 +18,13 @@
       "enum": ["llm", "deterministic"],
       "description": "Execution type"
     },
-    "provider": {
+    "base_url": {
       "type": "string",
-      "enum": ["openai", "anthropic"],
-      "description": "LLM provider. If omitted, auto-detected from model name (claude-* → anthropic, otherwise openai)."
+      "description": "API endpoint URL. When set, uses an OpenAI-compatible client pointed at this URL."
+    },
+    "api_key_env": {
+      "type": "string",
+      "description": "Name of the environment variable holding the API key."
     },
     "model": {
       "type": "string",

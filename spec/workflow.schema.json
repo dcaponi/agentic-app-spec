@@ -147,15 +147,15 @@
       "properties": {
         "route": {
           "type": "object",
-          "required": ["id", "router", "input", "routes"],
+          "required": ["id", "routing_agent", "input", "routes"],
           "properties": {
             "id": {
               "type": "string",
               "description": "Unique step identifier (used in bindings as $.steps.<id>)"
             },
-            "router": {
+            "routing_agent": {
               "type": "string",
-              "description": "Router ID (matches folder name in routers/)"
+              "description": "Routing agent ID (matches folder name in agentic-spec/routing-agents/)"
             },
             "input": {
               "type": "object",
@@ -187,11 +187,11 @@
             "fallback": {
               "type": "object",
               "description": "Fallback router if all retries on the primary router fail",
-              "required": ["router"],
+              "required": ["routing_agent"],
               "properties": {
-                "router": {
+                "routing_agent": {
                   "type": "string",
-                  "description": "Fallback router ID"
+                  "description": "Routing agent ID (matches folder name in agentic-spec/routing-agents/)"
                 },
                 "config": {
                   "type": "object",
