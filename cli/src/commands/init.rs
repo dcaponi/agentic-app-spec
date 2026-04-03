@@ -6,7 +6,12 @@ use crate::utils::dump_yaml;
 pub fn run() {
     let root = env::current_dir().expect("Failed to get current directory");
 
-    let dirs = ["agents", "workflows", "schemas"];
+    let dirs = [
+        "agentic-spec/agents",
+        "agentic-spec/workflows",
+        "agentic-spec/schemas",
+        "agentic-spec/routing-agents",
+    ];
 
     for dir in &dirs {
         let full = root.join(dir);

@@ -3,7 +3,7 @@ use std::fs;
 use crate::utils::{dump_yaml, find_project_root, load_yaml, to_snake_case};
 
 fn is_deterministic_agent(root: &std::path::Path, agent_id: &str) -> bool {
-    let yaml_path = root.join("agents").join(agent_id).join("agent.yaml");
+    let yaml_path = root.join("agentic-spec").join("agents").join(agent_id).join("agent.yaml");
     if !yaml_path.exists() {
         return false;
     }
@@ -41,7 +41,7 @@ fn build_step(agent_id: &str, deterministic: bool) -> serde_yaml::Value {
 
 pub fn run(name: &str, agents: Option<&str>) {
     let root = find_project_root();
-    let workflows_dir = root.join("workflows");
+    let workflows_dir = root.join("agentic-spec").join("workflows");
 
     if !workflows_dir.exists() {
         fs::create_dir_all(&workflows_dir).expect("Failed to create workflows directory");
@@ -107,7 +107,7 @@ pub fn run(name: &str, agents: Option<&str>) {
 
     let yaml_val = serde_yaml::Value::Mapping(workflow);
     fs::write(&file_path, dump_yaml(&yaml_val)).expect("Failed to write workflow YAML");
-    println!("  created workflows/{}.yaml", name);
+    println!("  created agentic-spec/workflows/{}.yaml", name);
 
     let step_count = if agent_ids.is_empty() { 1 } else { agent_ids.len() };
     println!("\nWorkflow \"{}\" added with {} step(s).", name, step_count);

@@ -100,14 +100,18 @@ pub fn dump_yaml(value: &serde_yaml::Value) -> String {
 
 // ── Project root discovery ──────────────────────────────────────────────────
 
-/// Walk up from `cwd` looking for `agentic.config.yaml` or an `agents/`
-/// directory. Returns the first matching ancestor, or falls back to `cwd`.
+/// Walk up from `cwd` looking for `agentic.config.yaml`, an `agents/`
+/// directory, or an `agentic-spec/` directory. Returns the first matching
+/// ancestor, or falls back to `cwd`.
 pub fn find_project_root() -> PathBuf {
     let cwd = env::current_dir().expect("Failed to get current directory");
     let mut dir = cwd.clone();
 
     loop {
-        if dir.join("agentic.config.yaml").exists() || dir.join("agents").exists() {
+        if dir.join("agentic.config.yaml").exists()
+            || dir.join("agents").exists()
+            || dir.join("agentic-spec").exists()
+        {
             return dir;
         }
         match dir.parent() {

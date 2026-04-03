@@ -78,7 +78,7 @@ fn build_prompt_md(id: &str) -> String {
 
 pub fn run(id: &str, agent_type: &str, model: &str, input_type: &str) {
     let root = find_project_root();
-    let agent_dir = root.join("agents").join(id);
+    let agent_dir = root.join("agentic-spec").join("agents").join(id);
 
     if agent_dir.exists() {
         eprintln!("Error: agent \"{}\" already exists at {}", id, agent_dir.display());
@@ -91,12 +91,12 @@ pub fn run(id: &str, agent_type: &str, model: &str, input_type: &str) {
         let yaml = build_llm_agent_yaml(id, model, input_type);
         fs::write(agent_dir.join("agent.yaml"), dump_yaml(&yaml)).expect("Failed to write agent.yaml");
         fs::write(agent_dir.join("prompt.md"), build_prompt_md(id)).expect("Failed to write prompt.md");
-        println!("  created agents/{}/agent.yaml", id);
-        println!("  created agents/{}/prompt.md", id);
+        println!("  created agentic-spec/agents/{}/agent.yaml", id);
+        println!("  created agentic-spec/agents/{}/prompt.md", id);
     } else {
         let yaml = build_deterministic_agent_yaml(id);
         fs::write(agent_dir.join("agent.yaml"), dump_yaml(&yaml)).expect("Failed to write agent.yaml");
-        println!("  created agents/{}/agent.yaml", id);
+        println!("  created agentic-spec/agents/{}/agent.yaml", id);
     }
 
     println!("\nAgent \"{}\" added ({}).", id, agent_type);

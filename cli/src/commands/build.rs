@@ -40,7 +40,7 @@ fn extract_fields(input: Option<&serde_yaml::Value>) -> Vec<FieldInfo> {
 }
 
 fn discover_agents(root: &Path) -> Vec<AgentMeta> {
-    let agents_dir = root.join("agents");
+    let agents_dir = root.join("agentic-spec").join("agents");
     if !agents_dir.exists() {
         return vec![];
     }
@@ -60,7 +60,7 @@ fn discover_agents(root: &Path) -> Vec<AgentMeta> {
             let fields = extract_fields(data.get("input"));
             agents.push(AgentMeta {
                 id: id.clone(),
-                yaml_path: format!("agents/{}/agent.yaml", id),
+                yaml_path: format!("agentic-spec/agents/{}/agent.yaml", id),
                 fields,
             });
         }
@@ -70,7 +70,7 @@ fn discover_agents(root: &Path) -> Vec<AgentMeta> {
 }
 
 fn discover_workflows(root: &Path) -> Vec<WorkflowMeta> {
-    let workflows_dir = root.join("workflows");
+    let workflows_dir = root.join("agentic-spec").join("workflows");
     if !workflows_dir.exists() {
         return vec![];
     }
@@ -90,7 +90,7 @@ fn discover_workflows(root: &Path) -> Vec<WorkflowMeta> {
             let fields = extract_fields(data.get("input"));
             workflows.push(WorkflowMeta {
                 name: name.clone(),
-                yaml_path: format!("workflows/{}", fname),
+                yaml_path: format!("agentic-spec/workflows/{}", fname),
                 fields,
             });
         }
