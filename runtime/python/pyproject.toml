@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-engine"
-version = "0.2.0"
+version = "1.0.0"
 description = "Runtime engine for Agentic App Spec — powers generated stubs from `agentic build --lang python`."
 license = "MIT"
 requires-python = ">=3.10"
