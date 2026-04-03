@@ -154,10 +154,12 @@ async def _execute_step(
                 used_fallback=True,
             )
         except Exception as fb_exc:
+            fb_info = serialize_error(fb_exc)
             log.error(
                 "Fallback agent also failed",
                 step_id=step.id,
-                **serialize_error(fb_exc),
+                error=fb_info["message"],
+                error_name=fb_info["name"],
             )
             last_error = fb_exc
 
@@ -288,7 +290,8 @@ async def orchestrate(
         error_msg = None
 
     except Exception as exc:
-        log.error("Workflow failed", workflow=workflow_name, **serialize_error(exc))
+        err_info = serialize_error(exc)
+        log.error("Workflow failed", workflow=workflow_name, error=err_info["message"], error_name=err_info["name"])
         output = {}
         status = "error"
         error_msg = str(exc)

@@ -103,7 +103,8 @@ async def _run_deterministic(
         if inspect.isawaitable(result):
             result = await result
     except Exception as exc:
-        log.error("Handler failed", handler=handler_name, **serialize_error(exc))
+        ei = serialize_error(exc)
+        log.error("Handler failed", handler=handler_name, error=ei["message"], error_name=ei["name"])
         raise
 
     elapsed_ms = (time.monotonic() - start) * 1000

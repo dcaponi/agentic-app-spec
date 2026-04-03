@@ -186,7 +186,8 @@ async def _call_openai(
             response_format=response_format,
         )
     except Exception as exc:
-        log.error("OpenAI call failed", **serialize_error(exc))
+        ei = serialize_error(exc)
+        log.error("OpenAI call failed", error=ei["message"], error_name=ei["name"])
         raise
 
     elapsed_ms = (time.monotonic() - start) * 1000
@@ -307,7 +308,8 @@ async def _call_anthropic(
             temperature=temperature,
         )
     except Exception as exc:
-        log.error("Anthropic call failed", **serialize_error(exc))
+        ei = serialize_error(exc)
+        log.error("Anthropic call failed", error=ei["message"], error_name=ei["name"])
         raise
 
     elapsed_ms = (time.monotonic() - start) * 1000
