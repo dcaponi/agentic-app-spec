@@ -59,9 +59,10 @@ module AgenticEngine
       private
 
       def execute_llm_agent(input, agent_def, config_overrides: nil)
-        model = (config_overrides && config_overrides["model"]) || agent_def.model
+        model       = (config_overrides && config_overrides["model"])       || agent_def.model
         temperature = (config_overrides && config_overrides["temperature"]) || agent_def.temperature || 0.7
-        provider = (config_overrides && config_overrides["provider"]) || agent_def.provider
+        base_url    = (config_overrides && config_overrides["base_url"])    || agent_def.base_url
+        api_key_env = (config_overrides && config_overrides["api_key_env"]) || agent_def.api_key_env
 
         raise RunnerError, "LLM agent '#{agent_def.name}' has no model configured" unless model
 
@@ -72,7 +73,7 @@ module AgenticEngine
                          JSON.generate(input)
                        end
 
-        @log.debug("execute_llm_agent", { agent: agent_def.name, model: model, provider: provider })
+        @log.debug("execute_llm_agent", { agent: agent_def.name, model: model, base_url: base_url })
 
         LLM.call_llm(
           model:         model,
@@ -80,7 +81,8 @@ module AgenticEngine
           user_content:  user_content,
           temperature:   temperature,
           schema_name:   agent_def.schema,
-          provider:      provider
+          base_url:      base_url,
+          api_key_env:   api_key_env
         )
       end
 

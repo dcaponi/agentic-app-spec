@@ -9,11 +9,11 @@ module AgenticEngine
   # agentic.config.yaml or an agents/ directory, then caches all loaded
   # artefacts in module-level hashes.
   module Loader
-    @agents    = {} # { agent_id => AgentDefinition }
-    @workflows = {} # { workflow_name => WorkflowDefinition }
-    @schemas   = {} # { schema_name => Hash (parsed JSON schema wrapper) }
-    @routers   = {} # { router_id => RouterDefinition }
-    @root      = nil
+    @agents          = {} # { agent_id => AgentDefinition }
+    @workflows       = {} # { workflow_name => WorkflowDefinition }
+    @schemas         = {} # { schema_name => Hash (parsed JSON schema wrapper) }
+    @routing_agents  = {} # { routing_agent_id => RoutingAgentDefinition }
+    @root            = nil
 
     class << self
       attr_reader :agents, :workflows, :schemas
@@ -23,13 +23,14 @@ module AgenticEngine
         @agents.clear
         @workflows.clear
         @schemas.clear
-        @routers.clear
+        @routing_agents.clear
         @root = nil
       end
 
       # ── Project root discovery ──
 
-      # Walk up from +start+ looking for agentic.config.yaml or agents/ dir.
+      # Walk up from +start+ looking for agentic.config.yaml, agentic-spec/ dir,
+      # or agents/ dir.
       #
       # @param start [String] directory to begin searching from (default: Dir.pwd)
       # @return [String, nil]
@@ -37,6 +38,7 @@ module AgenticEngine
         dir = File.expand_path(start)
         loop do
           return dir if File.exist?(File.join(dir, "agentic.config.yaml"))
+          return dir if File.directory?(File.join(dir, "agentic-spec"))
           return dir if File.directory?(File.join(dir, "agents"))
           parent = File.dirname(dir)
           return nil if parent == dir # reached filesystem root
@@ -58,7 +60,7 @@ module AgenticEngine
       def load_agent(agent_id)
         return @agents[agent_id] if @agents.key?(agent_id)
 
-        agent_dir = File.join(root, "agents", agent_id)
+        agent_dir = File.join(root, "agentic-spec", "agents", agent_id)
         yaml_path = File.join(agent_dir, "agent.yaml")
         raise "Agent not found: #{agent_id} (looked in #{yaml_path})" unless File.exist?(yaml_path)
 
@@ -72,7 +74,8 @@ module AgenticEngine
           name:         raw["name"],
           description:  raw["description"],
           type:         raw["type"],
-          provider:     raw["provider"],
+          base_url:     raw["base_url"],
+          api_key_env:  raw["api_key_env"],
           model:        raw["model"],
           temperature:  raw["temperature"],
           input_type:   raw["input_type"] || "text",
@@ -87,30 +90,31 @@ module AgenticEngine
         @agents[agent_id] = definition
       end
 
-      # ── Router loading ──
+      # ── Routing agent loading ──
 
-      # Load a single router by its directory-name ID (e.g. "content-classifier").
+      # Load a single routing agent by its directory-name ID (e.g. "content-classifier").
       #
-      # @param router_id [String]
-      # @return [RouterDefinition]
-      def load_router(router_id)
-        return @routers[router_id] if @routers.key?(router_id)
+      # @param routing_agent_id [String]
+      # @return [RoutingAgentDefinition]
+      def load_routing_agent(routing_agent_id)
+        return @routing_agents[routing_agent_id] if @routing_agents.key?(routing_agent_id)
 
-        router_dir = File.join(root, "routers", router_id)
-        yaml_path = File.join(router_dir, "router.yaml")
-        raise "Router not found: #{router_id} (looked in #{yaml_path})" unless File.exist?(yaml_path)
+        routing_agent_dir = File.join(root, "agentic-spec", "routing-agents", routing_agent_id)
+        yaml_path = File.join(routing_agent_dir, "routing-agent.yaml")
+        raise "Routing agent not found: #{routing_agent_id} (looked in #{yaml_path})" unless File.exist?(yaml_path)
 
         raw = YAML.safe_load(File.read(yaml_path), permitted_classes: [Symbol])
 
         prompt = nil
-        prompt_path = File.join(router_dir, "prompt.md")
+        prompt_path = File.join(routing_agent_dir, "prompt.md")
         prompt = File.read(prompt_path).strip if File.exist?(prompt_path)
 
-        definition = RouterDefinition.new(
+        definition = RoutingAgentDefinition.new(
           name:        raw["name"],
           description: raw["description"],
           strategy:    raw["strategy"],
-          provider:    raw["provider"],
+          base_url:    raw["base_url"],
+          api_key_env: raw["api_key_env"],
           model:       raw["model"],
           temperature: raw["temperature"],
           handler:     raw["handler"],
@@ -118,7 +122,7 @@ module AgenticEngine
           input:       raw["input"] || {}
         )
 
-        @routers[router_id] = definition
+        @routing_agents[routing_agent_id] = definition
       end
 
       # ── Workflow loading ──
@@ -130,7 +134,7 @@ module AgenticEngine
       def load_workflow(workflow_name)
         return @workflows[workflow_name] if @workflows.key?(workflow_name)
 
-        yaml_path = File.join(root, "workflows", "#{workflow_name}.yaml")
+        yaml_path = File.join(root, "agentic-spec", "workflows", "#{workflow_name}.yaml")
         raise "Workflow not found: #{workflow_name} (looked in #{yaml_path})" unless File.exist?(yaml_path)
 
         raw = YAML.safe_load(File.read(yaml_path), permitted_classes: [Symbol])
@@ -158,7 +162,7 @@ module AgenticEngine
       def load_schema(schema_name)
         return @schemas[schema_name] if @schemas.key?(schema_name)
 
-        json_path = File.join(root, "schemas", "#{schema_name}.json")
+        json_path = File.join(root, "agentic-spec", "schemas", "#{schema_name}.json")
         raise "Schema not found: #{schema_name} (looked in #{json_path})" unless File.exist?(json_path)
 
         parsed = JSON.parse(File.read(json_path))
@@ -175,16 +179,16 @@ module AgenticEngine
                          { max_attempts: raw["retry"]["max_attempts"], backoff_ms: raw["retry"]["backoff_ms"] }
                        end
         fallback = if raw["fallback"]
-                     { router: raw["fallback"]["router"], config: raw["fallback"]["config"] }
+                     { routing_agent: raw["fallback"]["routing_agent"], config: raw["fallback"]["config"] }
                    end
 
         RouteBlock.new(
-          id:       raw["id"],
-          router:   raw["router"],
-          input:    raw["input"] || {},
-          routes:   raw["routes"] || {},
-          retry:    retry_config,
-          fallback: fallback
+          id:             raw["id"],
+          routing_agent:  raw["routing_agent"],
+          input:          raw["input"] || {},
+          routes:         raw["routes"] || {},
+          retry:          retry_config,
+          fallback:       fallback
         )
       end
 

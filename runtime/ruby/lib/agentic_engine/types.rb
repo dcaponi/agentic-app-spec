@@ -84,7 +84,8 @@ module AgenticEngine
     :name,
     :description,
     :type,           # "llm" | "deterministic"
-    :provider,       # "openai" | "anthropic" (auto-detected from model if nil)
+    :base_url,       # optional OpenAI-compatible base URL
+    :api_key_env,    # env var name for the API key
     :model,
     :temperature,
     :input_type,     # "image" | "text"
@@ -123,8 +124,8 @@ module AgenticEngine
     keyword_init: true
   )
 
-  RouterDefinition = Struct.new(
-    :name, :description, :strategy, :provider, :model,
+  RoutingAgentDefinition = Struct.new(
+    :name, :description, :strategy, :base_url, :api_key_env, :model,
     :temperature, :handler, :prompt, :input,
     keyword_init: true
   ) do
@@ -134,7 +135,7 @@ module AgenticEngine
   end
 
   RouteBlock = Struct.new(
-    :id, :router, :input, :routes, :retry, :fallback,
+    :id, :routing_agent, :input, :routes, :retry, :fallback,
     keyword_init: true
   )
 

@@ -247,7 +247,7 @@ module AgenticEngine
         context["steps"][route_block.id] = { "output" => default_output }
         step_results << StepResult.new(
           id:      route_block.id,
-          agent:   "router:#{route_block.router}",
+          agent:   "routing-agent:#{route_block.routing_agent}",
           status:  "skipped",
           output:  default_output,
           metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
@@ -265,13 +265,13 @@ module AgenticEngine
 
         @log.info("route:start", {
           route: route_block.id,
-          router: route_block.router,
+          routing_agent: route_block.routing_agent,
           route_keys: route_block.routes.keys,
           max_attempts: max_attempts,
           has_fallback: !!route_block.fallback
         })
 
-        router_def     = Loader.load_router(route_block.router)
+        router_def     = Loader.load_routing_agent(route_block.routing_agent)
         resolved_input = Resolver.resolve_inputs(route_block.input, context)
         route_keys     = route_block.routes.keys.reject { |k| k == "_none" }
 
@@ -289,7 +289,7 @@ module AgenticEngine
           @log.info("route:decision_attempt", { route: route_block.id, attempt: total_attempts, max: max_attempts })
 
           begin
-            output = execute_router_decision(router_def, resolved_input, route_keys)
+            output = execute_routing_agent_decision(router_def, resolved_input, route_keys)
             key = output.is_a?(Hash) ? (output["route"] || output[:route]) : nil
             key = key.to_s
 
@@ -297,7 +297,7 @@ module AgenticEngine
 
             if key != "_none" && !route_block.routes.key?(key)
               raise OrchestrationError,
-                    "Router \"#{route_block.router}\" returned invalid route key \"#{key}\". " \
+                    "Routing agent \"#{route_block.routing_agent}\" returned invalid route key \"#{key}\". " \
                     "Valid keys: #{(route_keys + ["_none"]).join(", ")}"
             end
 
@@ -315,20 +315,20 @@ module AgenticEngine
           end
         end
 
-        # Fallback router decision
+        # Fallback routing agent decision
         if !decided && route_block.fallback
-          @log.info("route:fallback_decision", { route: route_block.id, fallback_router: route_block.fallback[:router] })
+          @log.info("route:fallback_decision", { route: route_block.id, fallback_routing_agent: route_block.fallback[:routing_agent] })
           begin
-            fallback_def = Loader.load_router(route_block.fallback[:router])
+            fallback_def = Loader.load_routing_agent(route_block.fallback[:routing_agent])
             merged_fallback = route_block.fallback[:config] ? fallback_def.dup.tap { |d|
               route_block.fallback[:config].each { |k, v| d[k.to_sym] = v rescue nil }
             } : fallback_def
-            output = execute_router_decision(merged_fallback, resolved_input, route_keys)
+            output = execute_routing_agent_decision(merged_fallback, resolved_input, route_keys)
             key = output.is_a?(Hash) ? (output["route"] || output[:route]) : nil
             key = key.to_s
 
             if key != "_none" && !route_block.routes.key?(key)
-              raise OrchestrationError, "Fallback router returned invalid key \"#{key}\""
+              raise OrchestrationError, "Fallback routing agent returned invalid key \"#{key}\""
             end
 
             chosen_key     = key
@@ -347,7 +347,7 @@ module AgenticEngine
           @log.error("route:decision_exhausted", { route: route_block.id, total_attempts: total_attempts })
           return StepResult.new(
             id:            route_block.id,
-            agent:         "router:#{route_block.router}",
+            agent:         "routing-agent:#{route_block.routing_agent}",
             status:        "error",
             output:        nil,
             metrics:       StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0),
@@ -357,7 +357,7 @@ module AgenticEngine
           )
         end
 
-        resolved_agent = used_fallback ? "router:#{route_block.fallback[:router]}" : "router:#{route_block.router}"
+        resolved_agent = used_fallback ? "routing-agent:#{route_block.fallback[:routing_agent]}" : "routing-agent:#{route_block.routing_agent}"
         target = route_block.routes[chosen_key]
 
         # ── Phase 2: Handle _none → short_circuit ──
@@ -391,13 +391,13 @@ module AgenticEngine
         )
       end
 
-      # Execute the router decision, returning a hash with a "route" key.
+      # Execute the routing agent decision, returning a hash with a "route" key.
       #
-      # @param router_def [RouterDefinition]
+      # @param router_def [RoutingAgentDefinition]
       # @param resolved_input [Hash]
       # @param route_keys [Array<String>]
       # @return [Hash] e.g. { "route" => "sports" }
-      def execute_router_decision(router_def, resolved_input, route_keys)
+      def execute_routing_agent_decision(router_def, resolved_input, route_keys)
         if router_def.strategy == "deterministic"
           agent_compat = AgentDefinition.new(
             name:        router_def.name,
@@ -420,12 +420,13 @@ module AgenticEngine
             "Respond with a JSON object: { \"route\": \"<chosen_key>\" }"
 
           result = LLM.call_llm(
-            model:         router_def.model || "gpt-4.1-mini",
+            model:        router_def.model || "gpt-4.1-mini",
             system_prompt: router_def.prompt || "",
             user_content:  user_message,
             temperature:   router_def.temperature || 0,
             schema_name:   nil,
-            provider:      router_def.provider
+            base_url:      router_def.base_url,
+            api_key_env:   router_def.api_key_env
           )
           result[:output]
         end
