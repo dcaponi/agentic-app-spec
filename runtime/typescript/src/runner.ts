@@ -165,7 +165,8 @@ async function executeLLMAgent(
 			userContent,
 			temperature,
 			schemaName: agentDef.schema,
-			provider: agentDef.provider,
+			base_url: agentDef.base_url,
+			api_key_env: agentDef.api_key_env,
 		});
 		log.info(`LLM agent complete: ${agentDef.name}`, {
 			latency_ms: Math.round(result.metrics.latency_ms),

@@ -56,7 +56,8 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	type: 'llm' | 'deterministic';
-	provider?: 'openai' | 'anthropic';
+	base_url?: string;
+	api_key_env?: string;
 	model?: string;
 	temperature?: number;
 	input_type?: 'image' | 'text';
@@ -68,11 +69,12 @@ export interface AgentDefinition {
 	input?: Record<string, { type: string; required?: boolean }>;
 }
 
-export interface RouterDefinition {
+export interface RoutingAgentDefinition {
 	name: string;
 	description: string;
 	strategy: 'llm' | 'deterministic';
-	provider?: 'openai' | 'anthropic';
+	base_url?: string;
+	api_key_env?: string;
 	model?: string;
 	temperature?: number;
 	handler?: string;
@@ -132,11 +134,11 @@ export type RouteTarget = string | RouteTargetAgent | RouteTargetWorkflow | Rout
 
 export interface RouteBlock {
 	id: string;
-	router: string;
+	routing_agent: string;
 	input: Record<string, string>;
 	routes: Record<string, RouteTarget>;
 	retry?: RetryConfig;
-	fallback?: { router: string; config?: Record<string, unknown> };
+	fallback?: { routing_agent: string; config?: Record<string, unknown> };
 }
 
 export interface RouteEntry {

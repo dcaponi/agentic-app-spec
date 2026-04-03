@@ -38,16 +38,6 @@ function isZodSchema(schema: unknown): schema is z.ZodType {
 	);
 }
 
-// ── Provider detection ──
-
-type Provider = 'openai' | 'anthropic';
-
-function detectProvider(model: string, explicit?: string): Provider {
-	if (explicit === 'openai' || explicit === 'anthropic') return explicit;
-	if (model.startsWith('claude-')) return 'anthropic';
-	return 'openai';
-}
-
 // ── Clients (lazily initialised) ──
 
 let openaiClient: OpenAI | null = null;
@@ -97,7 +87,8 @@ export interface LLMCallOptions {
 		| Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }>;
 	temperature: number;
 	schemaName?: string | null;
-	provider?: string;
+	base_url?: string;
+	api_key_env?: string;
 }
 
 export interface LLMResult {
@@ -108,28 +99,52 @@ export interface LLMResult {
 // ── LLM call (provider router) ──
 
 export async function callLLM(options: LLMCallOptions): Promise<LLMResult> {
-	const provider = detectProvider(options.model, options.provider);
+	if (options.base_url) {
+		// Custom base URL — create a fresh OpenAI-compatible client
+		const apiKey = options.api_key_env
+			? (process.env[options.api_key_env] ?? 'not-needed')
+			: 'not-needed';
+		const customClient = new OpenAI({ baseURL: options.base_url, apiKey });
 
-	log.info('API call starting', {
-		provider,
-		model: options.model,
-		schema: options.schemaName ?? 'json_mode',
-		temperature: options.temperature,
-		system_prompt_length: options.systemPrompt.length,
-	});
+		log.info('API call starting', {
+			provider: 'custom',
+			base_url: options.base_url,
+			model: options.model,
+			schema: options.schemaName ?? 'json_mode',
+			temperature: options.temperature,
+			system_prompt_length: options.systemPrompt.length,
+		});
 
-	if (provider === 'anthropic') {
+		return callOpenAI(options, customClient);
+	} else if (options.model.startsWith('claude-')) {
+		log.info('API call starting', {
+			provider: 'anthropic',
+			model: options.model,
+			schema: options.schemaName ?? 'json_mode',
+			temperature: options.temperature,
+			system_prompt_length: options.systemPrompt.length,
+		});
+
 		return callAnthropic(options);
+	} else {
+		log.info('API call starting', {
+			provider: 'openai',
+			model: options.model,
+			schema: options.schemaName ?? 'json_mode',
+			temperature: options.temperature,
+			system_prompt_length: options.systemPrompt.length,
+		});
+
+		return callOpenAI(options);
 	}
-	return callOpenAI(options);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // OpenAI implementation
 // ══════════════════════════════════════════════════════════════════════════════
 
-async function callOpenAI(options: LLMCallOptions): Promise<LLMResult> {
-	const api = getOpenAIClient();
+async function callOpenAI(options: LLMCallOptions, api?: OpenAI): Promise<LLMResult> {
+	const client = api ?? getOpenAIClient();
 	const start = performance.now();
 
 	const messages: OpenAI.ChatCompletionMessageParam[] = [
@@ -142,14 +157,14 @@ async function callOpenAI(options: LLMCallOptions): Promise<LLMResult> {
 
 	if (schema && options.schemaName) {
 		if (isZodSchema(schema)) {
-			return callOpenAIWithZodSchema(api, messages, options, schema, start);
+			return callOpenAIWithZodSchema(client, messages, options, schema, start);
 		} else {
-			return callOpenAIWithJsonSchema(api, messages, options, schema as JsonSchemaObject, start);
+			return callOpenAIWithJsonSchema(client, messages, options, schema as JsonSchemaObject, start);
 		}
 	}
 
 	// No schema — JSON mode fallback
-	return callOpenAIJsonMode(api, messages, options, start);
+	return callOpenAIJsonMode(client, messages, options, start);
 }
 
 async function callOpenAIWithZodSchema(

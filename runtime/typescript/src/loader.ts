@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import YAML from 'yaml';
-import type { AgentDefinition, WorkflowDefinition, WorkflowSummary, JsonSchemaObject, RouterDefinition } from './types.js';
+import type { AgentDefinition, WorkflowDefinition, WorkflowSummary, JsonSchemaObject, RoutingAgentDefinition } from './types.js';
 import { createLogger, serializeError } from './logger.js';
 
 const log = createLogger('loader');
@@ -18,7 +18,7 @@ export function setProjectRoot(dir: string): void {
 	agentCache.clear();
 	workflowCache.clear();
 	jsonSchemaCache.clear();
-	routerCache.clear();
+	routingAgentCache.clear();
 }
 
 /** Get the current project root directory. */
@@ -27,19 +27,19 @@ export function getProjectRoot(): string {
 }
 
 function agentsDir(): string {
-	return join(ROOT, 'agents');
+	return join(ROOT, 'agentic-spec', 'agents');
 }
 
 function workflowsDir(): string {
-	return join(ROOT, 'workflows');
+	return join(ROOT, 'agentic-spec', 'workflows');
 }
 
 function schemasDir(): string {
-	return join(ROOT, 'schemas');
+	return join(ROOT, 'agentic-spec', 'schemas');
 }
 
-function routersDir(): string {
-	return join(ROOT, 'routers');
+function routingAgentsDir(): string {
+	return join(ROOT, 'agentic-spec', 'routing-agents');
 }
 
 // ── Caches (lazy-loaded, process-scoped) ──
@@ -47,7 +47,7 @@ function routersDir(): string {
 const agentCache = new Map<string, AgentDefinition>();
 const workflowCache = new Map<string, WorkflowDefinition>();
 const jsonSchemaCache = new Map<string, JsonSchemaObject>();
-const routerCache = new Map<string, RouterDefinition>();
+const routingAgentCache = new Map<string, RoutingAgentDefinition>();
 
 // ── Agent loading ──
 
@@ -132,38 +132,38 @@ export function loadAllAgents(): Map<string, AgentDefinition> {
 	return new Map(agentCache);
 }
 
-// ── Router loading ──
+// ── Routing agent loading ──
 
-export function loadRouter(routerId: string): RouterDefinition {
-	const cached = routerCache.get(routerId);
+export function loadRoutingAgent(routingAgentId: string): RoutingAgentDefinition {
+	const cached = routingAgentCache.get(routingAgentId);
 	if (cached) return cached;
 
-	const dir = join(routersDir(), routerId);
-	log.info(`Loading router: ${routerId}`, { path: dir });
+	const dir = join(routingAgentsDir(), routingAgentId);
+	log.info(`Loading routing-agent: ${routingAgentId}`, { path: dir });
 
 	if (!existsSync(dir)) {
-		const rd = routersDir();
-		log.error(`Router directory not found: ${routerId}`, {
+		const rd = routingAgentsDir();
+		log.error(`Routing-agent directory not found: ${routingAgentId}`, {
 			expected_path: dir,
-			routers_dir_exists: existsSync(rd),
-			available_routers: existsSync(rd)
+			routing_agents_dir_exists: existsSync(rd),
+			available_routing_agents: existsSync(rd)
 				? readdirSync(rd, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
 				: [],
 		});
-		throw new Error(`Router not found: ${routerId}. Directory does not exist: ${dir}`);
+		throw new Error(`Routing-agent not found: ${routingAgentId}. Directory does not exist: ${dir}`);
 	}
 
-	const configPath = join(dir, 'router.yaml');
+	const configPath = join(dir, 'routing-agent.yaml');
 	if (!existsSync(configPath)) {
-		log.error(`router.yaml not found for router: ${routerId}`, { expected_path: configPath });
-		throw new Error(`router.yaml not found at ${configPath}`);
+		log.error(`routing-agent.yaml not found for routing-agent: ${routingAgentId}`, { expected_path: configPath });
+		throw new Error(`routing-agent.yaml not found at ${configPath}`);
 	}
 
-	let config: RouterDefinition;
+	let config: RoutingAgentDefinition;
 	try {
 		config = YAML.parse(readFileSync(configPath, 'utf-8'));
 	} catch (err) {
-		log.error(`Failed to parse router.yaml for: ${routerId}`, {
+		log.error(`Failed to parse routing-agent.yaml for: ${routingAgentId}`, {
 			path: configPath,
 			error: serializeError(err).message,
 		});
@@ -173,18 +173,18 @@ export function loadRouter(routerId: string): RouterDefinition {
 	const promptPath = join(dir, 'prompt.md');
 	if (existsSync(promptPath)) {
 		config.prompt = readFileSync(promptPath, 'utf-8').trim();
-		log.debug(`Loaded prompt.md for router ${routerId}`, { prompt_length: config.prompt.length });
+		log.debug(`Loaded prompt.md for routing-agent ${routingAgentId}`, { prompt_length: config.prompt.length });
 	} else if (config.strategy === 'llm') {
-		log.warn(`LLM router ${routerId} has no prompt.md — system prompt will be empty`, { path: promptPath });
+		log.warn(`LLM routing-agent ${routingAgentId} has no prompt.md — system prompt will be empty`, { path: promptPath });
 	}
 
-	log.info(`Router loaded: ${routerId}`, {
+	log.info(`Routing-agent loaded: ${routingAgentId}`, {
 		strategy: config.strategy,
 		model: config.model,
 		has_prompt: !!config.prompt,
 	});
 
-	routerCache.set(routerId, config);
+	routingAgentCache.set(routingAgentId, config);
 	return config;
 }
 
@@ -290,6 +290,6 @@ export function clearCaches(): void {
 	agentCache.clear();
 	workflowCache.clear();
 	jsonSchemaCache.clear();
-	routerCache.clear();
+	routingAgentCache.clear();
 	log.info('All caches cleared');
 }

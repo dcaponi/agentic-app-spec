@@ -8,13 +8,13 @@ import type {
 	RouteTarget,
 	RouteOutput,
 	AgentDefinition,
-	RouterDefinition,
+	RoutingAgentDefinition,
 	ExecutionContext,
 	WorkflowEnvelope,
 	StepResult,
 	StepMetrics,
 } from './types.js';
-import { loadWorkflow, loadAllAgents, loadAgent, loadRouter } from './loader.js';
+import { loadWorkflow, loadAllAgents, loadAgent, loadRoutingAgent } from './loader.js';
 import { executeAgent } from './runner.js';
 import { resolveInputs, resolveOutputs } from './resolver.js';
 import { createLogger, serializeError } from './logger.js';
@@ -405,7 +405,7 @@ function fillRouteSkipped(
 	context.steps[routeBlock.id] = { output: defaultOutput };
 	results.push({
 		id: routeBlock.id,
-		agent: `router:${routeBlock.router}`,
+		agent: `routing-agent:${routeBlock.routing_agent}`,
 		status: 'skipped',
 		output: defaultOutput,
 		metrics: ZERO_METRICS,
@@ -468,13 +468,13 @@ async function executeRoute(
 	const backoffMs = routeBlock.retry?.backoff_ms ?? 0;
 
 	log.info(`Route ${routeBlock.id}: starting`, {
-		router: routeBlock.router,
+		routing_agent: routeBlock.routing_agent,
 		route_keys: Object.keys(routeBlock.routes),
 		max_attempts: maxAttempts,
 		has_fallback: !!routeBlock.fallback,
 	});
 
-	const routerDef = loadRouter(routeBlock.router);
+	const routingAgentDef = loadRoutingAgent(routeBlock.routing_agent);
 	const resolvedInput = resolveInputs(routeBlock.input, context);
 	const routeKeys = Object.keys(routeBlock.routes).filter((k) => k !== '_none');
 
@@ -492,14 +492,14 @@ async function executeRoute(
 		log.info(`Route ${routeBlock.id}: decision attempt ${attempt}/${maxAttempts}`);
 
 		try {
-			const output = await executeRouterDecision(routerDef, resolvedInput, routeKeys);
+			const output = await executeRoutingAgentDecision(routingAgentDef, resolvedInput, routeKeys);
 			const key = (output as Record<string, unknown>).route as string;
 
 			log.info(`Route ${routeBlock.id}: chose "${key}"`, { attempt });
 
 			if (key !== '_none' && !routeBlock.routes[key]) {
 				throw new Error(
-					`Router "${routeBlock.router}" returned invalid route key "${key}". ` +
+					`Routing-agent "${routeBlock.routing_agent}" returned invalid route key "${key}". ` +
 					`Valid keys: ${[...routeKeys, '_none'].join(', ')}`
 				);
 			}
@@ -523,24 +523,24 @@ async function executeRoute(
 
 	// Fallback decision (if primary failed)
 	if (!decided && routeBlock.fallback) {
-		log.info(`Route ${routeBlock.id}: trying fallback router for decision`, {
-			fallback_router: routeBlock.fallback.router,
+		log.info(`Route ${routeBlock.id}: trying fallback routing-agent for decision`, {
+			fallback_routing_agent: routeBlock.fallback.routing_agent,
 		});
 
 		try {
-			const fallbackDef = loadRouter(routeBlock.fallback.router);
+			const fallbackDef = loadRoutingAgent(routeBlock.fallback.routing_agent);
 			const mergedFallback = routeBlock.fallback.config
 				? { ...fallbackDef, ...routeBlock.fallback.config }
 				: fallbackDef;
-			const output = await executeRouterDecision(
-				mergedFallback as RouterDefinition, resolvedInput, routeKeys
+			const output = await executeRoutingAgentDecision(
+				mergedFallback as RoutingAgentDefinition, resolvedInput, routeKeys
 			);
 			const key = (output as Record<string, unknown>).route as string;
 
 			log.info(`Route ${routeBlock.id}: fallback chose "${key}"`);
 
 			if (key !== '_none' && !routeBlock.routes[key]) {
-				throw new Error(`Fallback router returned invalid key "${key}"`);
+				throw new Error(`Fallback routing-agent returned invalid key "${key}"`);
 			}
 
 			chosenKey = key;
@@ -564,7 +564,7 @@ async function executeRoute(
 		});
 		return {
 			id: routeBlock.id,
-			agent: `router:${routeBlock.router}`,
+			agent: `routing-agent:${routeBlock.routing_agent}`,
 			status: 'error',
 			output: null,
 			metrics: ZERO_METRICS,
@@ -576,7 +576,7 @@ async function executeRoute(
 
 	// ── Phase 2: Handle _none / short_circuit ──
 
-	const resolvedAgent = usedFallback ? `router:${routeBlock.fallback!.router}` : `router:${routeBlock.router}`;
+	const resolvedAgent = usedFallback ? `routing-agent:${routeBlock.fallback!.routing_agent}` : `routing-agent:${routeBlock.routing_agent}`;
 	const target = routeBlock.routes[chosenKey];
 
 	if (chosenKey === '_none' || (target && typeof target === 'object' && 'short_circuit' in target && target.short_circuit)) {
@@ -619,17 +619,17 @@ async function executeRoute(
 	};
 }
 
-async function executeRouterDecision(
-	routerDef: RouterDefinition,
+async function executeRoutingAgentDecision(
+	routingAgentDef: RoutingAgentDefinition,
 	resolvedInput: Record<string, unknown>,
 	routeKeys: string[]
 ): Promise<unknown> {
-	if (routerDef.strategy === 'deterministic') {
+	if (routingAgentDef.strategy === 'deterministic') {
 		const agentCompat: AgentDefinition = {
-			name: routerDef.name,
-			description: routerDef.description,
+			name: routingAgentDef.name,
+			description: routingAgentDef.description,
 			type: 'deterministic',
-			handler: routerDef.handler,
+			handler: routingAgentDef.handler,
 		};
 		const result = await executeAgent(resolvedInput, agentCompat);
 		return result.output;
@@ -647,12 +647,13 @@ async function executeRouterDecision(
 		`Respond with a JSON object: { "route": "<chosen_key>" }`;
 
 	const result = await callLLM({
-		model: routerDef.model ?? 'gpt-4.1-mini',
-		systemPrompt: routerDef.prompt ?? '',
+		model: routingAgentDef.model ?? 'gpt-4.1-mini',
+		systemPrompt: routingAgentDef.prompt ?? '',
 		userContent: userMessage,
-		temperature: routerDef.temperature ?? 0,
+		temperature: routingAgentDef.temperature ?? 0,
 		schemaName: null,
-		provider: routerDef.provider,
+		base_url: routingAgentDef.base_url,
+		api_key_env: routingAgentDef.api_key_env,
 	});
 
 	return result.output;
