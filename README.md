@@ -61,18 +61,27 @@ For a complete walkthrough building a real project from scratch, see [Building a
   - [Template Interpolation](#template-interpolation)
 - [Workflow Definition](#workflow-definition)
   - [workflow.yaml Reference](#workflowyaml-reference)
+  - [Step Types](#step-types)
+  - [Control Flow](#control-flow)
   - [Binding Syntax](#binding-syntax)
+  - [requires: Dependency Validation](#requires-dependency-validation)
   - [Execution Model](#execution-model)
-  - [Response Envelope](#response-envelope)
+- [Trail Contract](#trail-contract)
+- [Response Envelope](#response-envelope)
 - [Schemas](#schemas)
 - [Code Generation (Build Step)](#code-generation-build-step)
+- [Build-Time Validation](#build-time-validation)
 - [CLI](#cli)
 - [Language Support](#language-support)
   - [TypeScript](#typescript)
   - [Python](#python)
   - [Ruby](#ruby)
   - [Go](#go)
-- [Example Project: Product Review Pipeline](#example-project-product-review-pipeline)
+- [Example: Product Review Pipeline](#example-product-review-pipeline)
+- [Example: Grocery Classification (switch)](#example-grocery-classification-switch)
+- [Example: Iterative Refinement (loop)](#example-iterative-refinement-loop)
+- [Example: Batch Analysis (for_each)](#example-batch-analysis-for_each)
+- [Future: Agent-Level Tool Use](#future-agent-level-tool-use)
 - [Architecture Decisions](#architecture-decisions)
 - [Best Practices](#best-practices)
 - [Glossary](#glossary)
@@ -83,22 +92,28 @@ For a complete walkthrough building a real project from scratch, see [Building a
 
 ```
 project-root/
-├── agents/
-│   └── <agent-id>/
-│       ├── agent.yaml        # Agent configuration
-│       └── prompt.md          # System prompt (LLM agents only)
-├── workflows/
-│   └── <workflow-name>.yaml   # Workflow orchestration definition
-├── schemas/                   # (optional) Zod/JSON schemas for structured output
-└── agentic.config.yaml        # (optional) Project-level config
+├── agentic-spec/
+│   ├── agents/
+│   │   └── <agent-id>/
+│   │       ├── agent.yaml        # Agent configuration
+│   │       └── prompt.md          # System prompt (LLM agents only)
+│   ├── workflows/
+│   │   └── <workflow-name>.yaml   # Workflow orchestration definition
+│   └── schemas/                   # (optional) Zod/JSON schemas for structured output
+├── src/
+│   └── generated/                 # Output from agentic build
+│       ├── agents/
+│       └── workflows/
+├── agentic.config.yaml            # (optional) Project-level config
+└── package.json
 ```
 
 ### Directory Conventions
 
-- `**agents/**` -- Each subdirectory is an agent. The directory name is the **agent ID** and must be unique across the project. Use kebab-case (e.g., `review-analyzer`, `product-fetcher`).
-- `**workflows/`** -- Each YAML file is a workflow. The filename (minus extension) is the **workflow name**.
-- `**schemas/`** -- Optional directory for Zod or JSON Schema definitions. These are registered by name and referenced from agent configurations.
-- `**agentic.config.yaml**` -- Optional project-level configuration (default model, default temperature, schema registry path, etc.).
+- **`agentic-spec/agents/`** — Each subdirectory is an agent. The directory name is the **agent ID** and must be unique across the project. Use kebab-case (e.g., `review-analyzer`, `product-fetcher`).
+- **`agentic-spec/workflows/`** — Each YAML file is a workflow. The filename (minus extension) is the **workflow name**.
+- **`agentic-spec/schemas/`** — Optional directory for Zod or JSON Schema definitions. These are registered by name and referenced from agent configurations.
+- **`agentic.config.yaml`** — Optional project-level configuration (default model, default temperature, schema registry path, etc.).
 
 ---
 
@@ -106,10 +121,10 @@ project-root/
 
 An agent is a single unit of work. It is either an **LLM agent** (calls a language model) or a **deterministic agent** (runs a handler function with no LLM involved).
 
-Each agent lives in its own directory under `agents/`:
+Each agent lives in its own directory under `agentic-spec/agents/`:
 
 ```
-agents/
+agentic-spec/agents/
 └── review-analyzer/
     ├── agent.yaml
     └── prompt.md
@@ -187,6 +202,12 @@ handler: string
 
 # ---------- Shared fields ----------
 
+base_url: string
+# API endpoint URL. When set, uses an OpenAI-compatible client pointed at this URL.
+
+api_key_env: string
+# Name of the environment variable holding the API key (e.g., DEEPSEEK_API_KEY).
+
 input:
   <param_name>:
     type: 'base64' | 'string' | 'number' | 'boolean' | 'object'
@@ -256,13 +277,13 @@ input:
 For **LLM agents**, the system prompt lives in a file called `prompt.md` in the same directory as `agent.yaml`. This file contains the system message that is sent to the model before the user message.
 
 ```
-agents/
+agentic-spec/agents/
 └── review-analyzer/
     ├── agent.yaml
     └── prompt.md    <-- system prompt
 ```
 
-The system prompt is plain Markdown. It can be as long or as short as needed. The runtime reads this file at build time (or at agent load time, depending on the implementation) and sends it as the `system` role message in the LLM call.
+The system prompt is plain Markdown. It can be as long or as short as needed. The runtime reads this file at agent load time and sends it as the `system` role message in the LLM call.
 
 **Deterministic agents do not need a `prompt.md` file.** If one is present, it is ignored.
 
@@ -346,14 +367,18 @@ Reference nutrients: {"calories":400}
 
 ## Workflow Definition
 
-A workflow chains agents together into a pipeline. It declares the execution order, data flow between steps, parallel groups, retry/fallback logic, short-circuit conditions, and the final output shape.
+A workflow chains agents together into a directed graph. It declares the execution order, data flow between steps, control flow (branching, loops, fan-out), retry/fallback logic, and the final output shape.
 
-Each workflow is a single YAML file in the `workflows/` directory:
+Each workflow is a single YAML file in the `agentic-spec/workflows/` directory:
 
 ```
-workflows/
+agentic-spec/workflows/
 └── product-review.yaml
 ```
+
+### Design Principle
+
+**Agents compute, workflows orchestrate.** Anything that decides "what happens next" belongs in the workflow. Anything that decides "how to produce an answer" belongs in the agent.
 
 ### workflow.yaml Reference
 
@@ -362,125 +387,29 @@ workflows/
 
 name: string
 # Human-readable workflow name.
-# Example: "Product Review Pipeline"
 
 description: string
 # Plain-language description of the workflow's purpose.
-# Example: "Fetches a product, analyzes its reviews, and generates a comprehensive review"
 
 version: string
 # Semantic version string for this workflow definition.
-# Example: "1.0"
 
 # ---------- Inputs ----------
 
 input:
   <param_name>:
     type: 'base64' | 'string' | 'number' | 'boolean' | 'object'
-    # Data type (same type system as agent inputs).
     required: boolean
-    # Whether the caller must provide this parameter. Default: true.
 
 # ---------- Steps ----------
 
 steps:
-  # Steps are an ordered list. By default, they execute serially (top to bottom).
-  # Each step is either a serial step or a parallel group.
-
-  # --- Serial Step ---
-  - id: string
-    # Unique step identifier. Used in binding paths (e.g., $.steps.<id>.output).
-    # Must be unique within the workflow.
-
-    agent: string
-    # Agent ID — must match a directory name under agents/.
-    # Example: "review-analyzer"
-
-    input:
-      <param>: <binding>
-      # Input bindings. Each key is an agent input parameter name.
-      # Each value is a binding expression (see "Binding Syntax" below)
-      # or a literal value.
-
-    config:
-      # (optional) Override agent configuration at the step level.
-      # Any field from agent.yaml can be overridden here.
-      model: string
-      # Example: use a different model for this step
-      temperature: number
-      # Example: use a different temperature
-
-    retry:
-      # (optional) Retry configuration for transient failures.
-      max_attempts: number
-      # Total number of attempts including the first try.
-      # Example: 3 means 1 initial attempt + 2 retries.
-      backoff_ms: number
-      # Base delay between retries in milliseconds.
-      # The actual delay is backoff_ms * attempt_number.
-      # Example: backoff_ms: 500 -> delays of 500ms, 1000ms, 1500ms, ...
-
-    fallback:
-      # (optional) Fallback agent to use if all retry attempts fail.
-      agent: string
-      # Agent ID for the fallback. Can be the same agent (with different
-      # config) or a completely different agent.
-      config:
-        # (optional) Config overrides for the fallback execution.
-        model: string
-        # Common pattern: fall back to a cheaper/faster model.
-        # Example: "gpt-4.1-mini"
-
-    short_circuit:
-      # (optional) Early exit condition evaluated after this step completes.
-      condition: string
-      # A JavaScript expression evaluated with the step's `output` in scope.
-      # If the expression evaluates to a truthy value, ALL remaining steps
-      # are skipped.
-      # Examples:
-      #   "!output.is_food"
-      #   "output.score < 0.5"
-      #   "output.status === 'not_found'"
-
-      defaults:
-        <step_id>: <value>
-        # Default output values for each subsequent step that would be
-        # skipped. Keyed by step ID. These values populate the skipped
-        # steps' output fields in the response envelope.
-        # Example:
-        #   review-analyzer: { sentiment: "N/A", error: "Product not found" }
-        #   review-writer: { review: "No review generated" }
-
-  # --- Parallel Group ---
-  - parallel:
-    # An array of steps that run concurrently. The orchestrator launches
-    # all steps in the group simultaneously (Promise.all in JS, asyncio.gather
-    # in Python, goroutines in Go) and waits for all to complete before
-    # proceeding to the next step.
-    #
-    # Each step inside a parallel group supports the same fields as a
-    # serial step (id, agent, input, config, retry, fallback).
-    # Short-circuit is NOT supported inside parallel groups.
-
-    - id: string
-      agent: string
-      input:
-        <param>: <binding>
-      config:
-        model: string
-        temperature: number
-      retry:
-        max_attempts: number
-        backoff_ms: number
-      fallback:
-        agent: string
-        config:
-          model: string
-
-    - id: string
-      agent: string
-      input:
-        <param>: <binding>
+  # Steps form a directed graph. By default, they execute top-to-bottom
+  # (each step falls through to the next in the array). Use next: to
+  # override control flow — branching, jumping, or terminating early.
+  #
+  # Step types: agent step, workflow step, parallel block, loop block, for_each step.
+  # See "Step Types" below.
 
 # ---------- Output ----------
 
@@ -488,91 +417,213 @@ output:
   <key>: <binding>
   # Workflow output bindings. Maps named output keys to binding expressions
   # that reference step outputs or workflow inputs.
-  # These are resolved after all steps complete (or after a short-circuit)
-  # and become the `result` field in the response envelope.
+  # These are resolved after execution completes and become the `result`
+  # field in the response envelope.
 ```
 
-#### Complete Workflow Example
+### Step Types
+
+#### Agent Step
+
+Invokes a single agent.
 
 ```yaml
-name: Product Review Pipeline
-description: Fetches a product, analyzes reviews, and generates a comprehensive review
-version: "1.0"
+- id: string
+  agent: string               # Agent ID (folder name in agentic-spec/agents/)
+  input:
+    <param>: <binding>        # Input bindings (see "Binding Syntax")
 
-input:
-  product_id:
-    type: number
-    required: true
+  # --- Optional fields ---
 
-steps:
-  - id: product-fetcher
-    agent: product-fetcher
-    input:
-      product_id: $.input.product_id
-    short_circuit:
-      condition: "!output.found"
-      defaults:
-        review-analyzer: { sentiment: null, pros: [], cons: [], themes: [] }
-        comparison-researcher: { comparisons: [] }
-        review-writer: { review: "Product not found." }
-        quality-scorer: { score: 0, breakdown: {} }
+  config:                     # Override agent config for this step
+    model: string             #   Whitelisted: model, temperature, image_detail
+    temperature: number
+    image_detail: string
 
-  - parallel:
-    - id: review-analyzer
-      agent: review-analyzer
-      input:
-        product_name: $.steps.product-fetcher.output.title
-        category: $.steps.product-fetcher.output.category
-        description: $.steps.product-fetcher.output.description
-        reviews: $.steps.product-fetcher.output.reviews
-      retry:
-        max_attempts: 3
-        backoff_ms: 500
-      fallback:
-        agent: review-analyzer
-        config:
-          model: gpt-4.1-mini
+  retry:                      # Retry on transient failure
+    max_attempts: number      #   Total attempts including first try
+    backoff_ms: number        #   Base delay (multiplied by attempt number)
 
-    - id: comparison-researcher
-      agent: comparison-researcher
-      input:
-        product_name: $.steps.product-fetcher.output.title
-        category: $.steps.product-fetcher.output.category
-        price: $.steps.product-fetcher.output.price
-      retry:
-        max_attempts: 3
-        backoff_ms: 500
-      fallback:
-        agent: comparison-researcher
-        config:
-          model: gpt-4.1-mini
+  fallback:                   # Fallback agent if all retries fail
+    agent: string
+    config:
+      model: string
 
-  - id: review-writer
-    agent: review-writer
-    input:
-      product_name: $.steps.product-fetcher.output.title
-      analysis: $.steps.review-analyzer.output
-      comparisons: $.steps.comparison-researcher.output
-    retry:
-      max_attempts: 4
-      backoff_ms: 1000
-    fallback:
-      agent: review-writer
-      config:
-        model: gpt-4.1-mini
+  requires:                   # Explicit binding dependencies (see "requires:")
+    - $.steps.<id>.output.<path>
 
-  - id: quality-scorer
-    agent: quality-scorer
-    input:
-      review: $.steps.review-writer.output.review
-
-output:
-  product: $.steps.product-fetcher.output
-  analysis: $.steps.review-analyzer.output
-  comparisons: $.steps.comparison-researcher.output
-  review: $.steps.review-writer.output.review
-  quality_score: $.steps.quality-scorer.output
+  next: <target>              # Control flow (see "Control Flow")
 ```
+
+#### Workflow Step
+
+Invokes a sub-workflow. The sub-workflow's envelope embeds in the parent step result under `sub_envelope`. Sub-workflow cycles are detected at build time.
+
+```yaml
+- id: string
+  workflow: string            # Workflow name (filename in agentic-spec/workflows/)
+  input:
+    <param>: <binding>
+  retry: { ... }
+  fallback: { ... }
+  requires: [ ... ]
+  next: <target>
+```
+
+The step's `output` is the sub-workflow's resolved `result` (the `output` bindings from the child workflow). The full child envelope (with its own trail, steps, and metrics) is available as `sub_envelope` on the step result for debugging.
+
+#### Parallel Block
+
+Runs independent branches concurrently with a join strategy.
+
+```yaml
+- parallel:
+    id: string                # Unique ID (used as next: target)
+    join: all | any | all_settled   # Default: all
+    branches:
+      - steps:                # Branch 1: multi-step sequence
+          - id: analyze
+            agent: review-analyzer
+            input: { ... }
+          - id: deep-analyze
+            agent: deep-analyzer
+            input:
+              initial: $.steps.analyze.output
+
+      - steps:                # Branch 2
+          - id: compare
+            agent: comparison-researcher
+            input: { ... }
+
+      - id: quick-check       # Sugar: bare step = single-step branch
+        agent: quick-checker
+        input: { ... }
+
+    next: <target>            # Optional; falls through by default
+```
+
+**Rules:**
+- Each branch is a `steps` array (a mini-workflow). A bare agent step is sugar for a single-step branch.
+- Branches execute concurrently. The join strategy determines when the block completes.
+- Within a branch, steps are sequential and can reference earlier steps in the same branch.
+- Cross-branch references are prohibited (enforced at build time).
+- `join: all` — wait for every branch to complete (default).
+- `join: any` — first branch to complete wins; remaining branches are cancelled.
+- `join: all_settled` — wait for all branches, tolerate individual branch failures.
+
+#### Loop Block
+
+Bounded iteration: repeats a set of steps until a condition is met or the iteration cap is reached.
+
+```yaml
+- loop:
+    id: string                # Unique ID
+    max_iterations: number    # Hard cap (required, prevents runaway loops)
+    until: <binding>          # Exit condition, evaluated after each iteration
+    steps:
+      - id: draft
+        agent: writer
+        input:
+          previous: $.steps.draft.output      # null on first iteration
+          feedback: $.steps.review.output.feedback
+      - id: review
+        agent: reviewer
+        input:
+          draft: $.steps.draft.output
+    next: <target>            # Optional
+```
+
+**Rules:**
+- `until` is a binding expression evaluated after each complete iteration. Loop exits when the value is truthy.
+- Steps within the loop can reference their own prior outputs (overwritten each iteration). On the first iteration, prior-output references resolve to `null`.
+- `max_iterations` is required. There is no unbounded loop.
+- The loop's `output` is the final iteration's step outputs.
+- The trail emits one entry per iteration (see [Trail Contract](#trail-contract)).
+
+#### for_each Step
+
+Dynamic fan-out: invokes an agent once per element in a runtime-determined array.
+
+```yaml
+- id: string
+  for_each: <binding>         # Binding to an array
+  as: string                  # Loop variable name
+  agent: string               # Agent to invoke per element
+  input:
+    data: "{{item}}"          # Loop variable available via interpolation
+    context: $.steps.prior.output   # Other bindings still work
+  max_concurrency: number     # Optional; omit = all in parallel
+  config: { ... }
+  retry: { ... }              # Per iteration, not the step as a whole
+  fallback: { ... }           # Per iteration
+  requires: [ ... ]
+  next: <target>
+```
+
+**Rules:**
+- The orchestrator resolves the `for_each` binding to an array, then invokes the agent once per element.
+- If `max_concurrency` is set, runs that many concurrently with a rolling window. If omitted, all run in parallel.
+- Empty array produces `output: []` with status `success`.
+- The step's `output` is an array of per-iteration results in input-array order.
+- Downstream bindings use array indexing: `$.steps.<id>.output[0].field` or `$.steps.<id>.output` for the whole array.
+- Retry and fallback apply per iteration, not to the step as a whole.
+- If some iterations fail after retries, those slots contain error sentinels (`{ error: "..." }`) and the step's status is `partial_failure`.
+- The trail emits exactly two entries: `for_each_started` and `for_each_completed` (aggregate-only; see [Trail Contract](#trail-contract)).
+
+### Control Flow
+
+Every step has an optional `next:` field that determines which step executes afterward. When omitted, the default is **fall-through** to the next step in the `steps` array. This means simple linear workflows need no `next:` at all.
+
+#### Goto
+
+Jump to a specific step by ID:
+
+```yaml
+- id: validate
+  agent: validator
+  input: { ... }
+  next: summarize             # Jump to the step with id: summarize
+```
+
+#### switch (value-based branching)
+
+Branch on a field in the step's output:
+
+```yaml
+- id: classify
+  agent: food-classifier
+  input:
+    item_name: $.input.item_name
+  next:
+    switch: output.category
+    cases:
+      food: handle-food
+      non_food: handle-non-food
+    default: reject           # Required — prevents non-exhaustive branches
+```
+
+`switch` evaluates a dot-path expression against the step's output and jumps to the step ID matching the value. The `default` case is **required** — `agentic build` rejects workflows with non-exhaustive switch blocks.
+
+#### if (binary branching)
+
+Branch on a boolean condition:
+
+```yaml
+- id: fetch
+  agent: product-fetcher
+  input:
+    product_id: $.input.product_id
+  next:
+    if: output.found
+    then: analyze
+    else: not-found
+```
+
+Both `then` and `else` are **required** — every branch must be accounted for.
+
+#### Backward Edges
+
+`next:` can reference a step that appears earlier in the `steps` array, creating a cycle. This is the escape hatch for loop patterns that don't fit the `loop:` block. Backward edges must be detectable and bounded — `agentic build` performs cycle analysis and warns on unbounded cycles (those without a conditional exit).
 
 ### Binding Syntax
 
@@ -581,12 +632,14 @@ Bindings are path expressions that tell the orchestrator where to find data at r
 #### Binding Types
 
 
-| Pattern                           | Description                                                    | Example                                |
-| --------------------------------- | -------------------------------------------------------------- | -------------------------------------- |
-| `$.input.<key>`                   | Reference a workflow input parameter                           | `$.input.product_id`                   |
-| `$.steps.<step_id>.output`        | Reference the full output object of a completed step           | `$.steps.product-fetcher.output`       |
-| `$.steps.<step_id>.output.<path>` | Reference a nested field within a step's output                | `$.steps.product-fetcher.output.title` |
-| Literal value                     | Strings, numbers, booleans, and objects pass through unchanged | `"default-category"`, `42`, `true`     |
+| Pattern                               | Description                                             | Example                                  |
+| ------------------------------------- | ------------------------------------------------------- | ---------------------------------------- |
+| `$.input.<key>`                       | Reference a workflow input parameter                    | `$.input.product_id`                     |
+| `$.steps.<step_id>.output`            | Full output object of a completed step                  | `$.steps.fetch.output`                   |
+| `$.steps.<step_id>.output.<path>`     | Nested field within a step's output                     | `$.steps.fetch.output.title`             |
+| `$.steps.<step_id>.output[<n>]`       | Array index (for `for_each` outputs)                    | `$.steps.analyze-each.output[0].score`   |
+| `$.steps.<step_id>.output[<n>].<path>`| Nested field within an indexed array element            | `$.steps.analyze-each.output[2].summary` |
+| Literal value                         | Strings, numbers, booleans, objects pass through as-is  | `"default-category"`, `42`, `true`       |
 
 
 #### Deep Nesting
@@ -606,56 +659,157 @@ input:
 - If a binding resolves to `undefined` (e.g., the referenced step has not run yet, or the path does not exist in the output), a **warning is logged** but execution continues. The value is passed as `undefined` to the agent.
 - Literal values (strings, numbers, booleans, objects, arrays) are **not** interpreted as binding paths. Only strings starting with `$.` are treated as bindings.
 
+#### Trail Isolation
+
+Bindings starting with `$.trail` are **rejected at build time**. The trail is a rich event log intended for envelope consumers (debuggers, visualization tools, audit systems). It is not part of the execution context that feeds agent inputs.
+
+Allowing `$.trail` bindings would cause two problems:
+1. **Context bloat.** The entire execution history would be injected into agent prompts, drowning the signal the agent needs in noise.
+2. **Abstraction violation.** Agents would become entangled with workflow topology and execution metadata, breaking their reusability.
+
+Build error: `"$.trail bindings are not permitted. The trail is for envelope consumers only, not agent inputs."`
+
+### requires: Dependency Validation
+
+The optional `requires:` field on a step lists the binding paths it depends on:
+
+```yaml
+- id: summarize
+  agent: summarizer
+  requires:
+    - $.steps.classify.output.type
+    - $.steps.fetch.output.content
+  input:
+    category: $.steps.classify.output.type
+    body: $.steps.fetch.output.content
+```
+
+**Purpose:** In a flat graph with `next:` routing, a step can be reached by multiple paths. Some paths might not have executed the upstream steps the current step needs. `requires:` enables build-time validation that every path into a step satisfies its dependencies.
+
+**Behavior:**
+- `agentic build` walks the workflow graph from entry to every reachable step. For each path into a step, it verifies every `requires:` entry corresponds to an upstream step that will have executed on that path.
+- Build fails with a clear error if any path violates this: `"path classify-skip → summarize does not satisfy $.steps.classify.output.type."`
+- **If omitted:** `requires:` is inferred from the step's `input:` bindings — every `$.steps.X.output.*` becomes an inferred requirement. Users only need to write `requires:` explicitly when they want to document dependencies not visible in `input:` (rare) or override inference.
+
 ### Execution Model
 
-The orchestrator processes a workflow as follows:
+The orchestrator processes a workflow as a directed graph:
 
-1. **Input validation.** The orchestrator checks that all required workflow inputs are present and correctly typed. If validation fails, the workflow returns immediately with status `error`.
-2. **Sequential execution.** Steps execute in the order they appear in the `steps` array, from top to bottom. Each step must complete before the next one begins (unless grouped in a parallel block).
-3. **Context accumulation.** The orchestrator maintains an execution context object. After each step completes, its output is stored in the context at `$.steps.<step_id>.output`. This makes the output available to all subsequent steps via bindings.
-4. **Parallel groups.** When the orchestrator encounters a `parallel` block, it launches all contained steps simultaneously. In JavaScript, this is `Promise.all`; in Python, `asyncio.gather`; in Go, goroutines with a `WaitGroup`. All steps in the group must complete before the orchestrator moves to the next item in the `steps` array. Steps within a parallel group can reference outputs from earlier steps (above the parallel block) but **cannot** reference outputs from sibling steps within the same parallel group.
-5. **Retry.** If a step fails and has a `retry` configuration:
-  - The orchestrator retries the step up to `max_attempts` total times (including the initial attempt).
-  - Between each retry, it waits `backoff_ms * attempt_number` milliseconds. For example, with `backoff_ms: 500`: first retry waits 500ms, second retry waits 1000ms, third retry waits 1500ms.
-  - Each retry re-resolves input bindings (in case upstream data changed, though this is uncommon).
-6. **Fallback.** If all retry attempts are exhausted and the step still fails, and the step has a `fallback` configuration:
-  - The orchestrator loads the fallback agent (specified by `fallback.agent`).
-  - If `fallback.config` is provided, those values override the fallback agent's defaults (e.g., using a cheaper model).
-  - The fallback agent is executed **once** with the same resolved inputs.
-  - If the fallback succeeds, the step is marked as successful with `used_fallback: true`.
-  - If the fallback also fails, the step is marked as `error`.
-7. **Short-circuit.** If a step has a `short_circuit` configuration and the step completes successfully:
-  - The orchestrator evaluates the `condition` expression with the step's `output` object in scope.
-  - If the condition evaluates to a truthy value, **all remaining steps are skipped**.
-  - Each skipped step receives its default output from `short_circuit.defaults` (keyed by step ID).
-  - Skipped steps have status `skipped` in the response envelope.
-  - The workflow status is set to `short_circuited`.
-8. **Failure.** If a step fails after all retries and fallback (or if it has no retry/fallback configured), the workflow halts immediately. The workflow status is set to `error`, and the `error` field contains the failure message.
-9. **Output resolution.** After all steps complete (or after a short-circuit), the orchestrator resolves the `output` bindings. These resolved values become the `result` field in the response envelope.
+1. **Input validation.** Check that all required workflow inputs are present and correctly typed. If validation fails, return immediately with status `error`.
 
-### Response Envelope
+2. **Graph traversal.** Start at the first step in the `steps` array. After each step completes, determine the next step:
+   - If the step has `next:`, evaluate it (goto, switch, or if) to determine the target.
+   - If no `next:`, fall through to the next step in the array.
+   - If there is no next step (end of array or explicit termination), proceed to output resolution.
 
-Every workflow execution returns a **WorkflowEnvelope** -- a standardized response structure that provides the result, per-step details, and observability metrics.
+3. **Context accumulation.** After each step completes, its output is stored at `$.steps.<step_id>.output`. This makes it available to subsequent steps via bindings.
 
-#### WorkflowEnvelope
+4. **Parallel blocks.** When the orchestrator encounters a `parallel` block, it launches all branches simultaneously. The join strategy determines when the block completes:
+   - `all` — wait for every branch (default). If any branch fails, the block fails.
+   - `any` — first branch to complete wins. Remaining branches are cancelled.
+   - `all_settled` — wait for all branches, tolerate failures. Failed branches are recorded but don't halt the workflow.
+   - Steps within a branch can reference earlier steps in the same branch but **cannot** reference steps in sibling branches.
+
+5. **Loop blocks.** Execute the contained steps sequentially, then evaluate the `until` condition. If truthy, exit the loop. If falsy and `max_iterations` not reached, repeat. Step outputs are overwritten each iteration (prior values available via the same binding paths).
+
+6. **for_each steps.** Resolve the `for_each` binding to an array, then invoke the agent once per element. Respect `max_concurrency` if set. Collect results in input-array order.
+
+7. **Retry.** If a step fails and has a `retry` configuration:
+   - Retry up to `max_attempts` total times (including the initial attempt).
+   - Wait `backoff_ms * attempt_number` milliseconds between attempts.
+   - Each retry re-resolves input bindings.
+
+8. **Fallback.** If all retry attempts are exhausted and the step has a `fallback` configuration:
+   - Load the fallback agent with optional config overrides.
+   - Execute **once** with the same resolved inputs.
+   - If the fallback succeeds, mark with `used_fallback: true` and `fallback_reason` (the error from the last retry attempt).
+   - If the fallback also fails, the step is marked `error`.
+
+9. **Failure.** If a step fails after all retries and fallback (or has none configured), the workflow halts immediately. Status is set to `error`. The partial trail up to the failure point is preserved in the envelope (see [Partial Trail on Crash](#partial-trail-on-crash)).
+
+10. **Output resolution.** After execution completes, resolve the `output` bindings. These become the `result` field in the response envelope. Steps that were not reached (due to branching) have status `not_executed` and no output.
+
+---
+
+## Trail Contract
+
+The trail is an ordered event log that records every significant execution event during a workflow run. It exists for **envelope consumers** — debuggers, visualization tools, audit systems, cost trackers — not for agents. Agents receive their inputs via explicit bindings; the trail is invisible to them (see [Trail Isolation](#trail-isolation)).
+
+### Trail Entry Structure
+
+Each trail entry is an object with:
+
+```typescript
+{
+  type: string;                   // Event type (see below)
+  step_id?: string;               // Step that emitted this event (if applicable)
+  timestamp: string;              // ISO 8601 timestamp
+  details: Record<string, unknown>; // Type-specific payload
+}
+```
+
+### Trail Event Types
+
+| Event Type            | Emitted When                               | Details                                                                |
+| --------------------- | ------------------------------------------ | ---------------------------------------------------------------------- |
+| `step_started`        | Agent or workflow step begins              | `{ agent: string }` or `{ workflow: string }`                          |
+| `step_completed`      | Agent or workflow step finishes            | `{ status, latency_ms, attempts?, used_fallback?, fallback_reason? }`  |
+| `branch_evaluated`    | A `switch` or `if` condition is evaluated  | `{ expression: string, result: unknown, target: string }`              |
+| `parallel_started`    | Parallel block begins                      | `{ branch_count: number, join: string }`                               |
+| `parallel_completed`  | Parallel block finishes                    | `{ completed_count: number, join: string }`                            |
+| `loop_iteration`      | One iteration of a loop block completes    | `{ iteration: number, until_value: unknown }`                          |
+| `loop_completed`      | Loop block exits                           | `{ iterations: number, exit_reason: 'until_met' \| 'max_iterations' }`|
+| `for_each_started`    | for_each step begins                       | `{ input_count: number, max_concurrency: number \| null }`            |
+| `for_each_completed`  | for_each step finishes                     | `{ success_count, error_count, error_summary: string \| null, latency_ms }` |
+| `sub_workflow_entered` | Sub-workflow invocation begins            | `{ workflow: string }`                                                 |
+| `sub_workflow_exited`  | Sub-workflow invocation finishes          | `{ workflow: string, status: string }`                                 |
+| `workflow_ended`      | Workflow completes normally                | `{ status: string }`                                                   |
+
+### Aggregate-Only Trail Entries
+
+`for_each` steps emit exactly **two** trail entries, not one per iteration:
+- `for_each_started`: records input count and concurrency settings.
+- `for_each_completed`: records aggregate outcome.
+
+Where `error_summary` is a human-readable roll-up like `"3 of 10 iterations failed: 2x timeout, 1x parse error"` or `null` if all succeeded.
+
+Rationale: `for_each` is typically "apply this to a batch" — the aggregate outcome is what matters for debugging. Per-iteration detail is already in the step's `output` array and `StepResult` metrics. Workflow `loop:` blocks are different — each iteration IS a distinct execution cycle, so they get per-iteration trail entries.
+
+### Partial Trail on Crash
+
+If a workflow crashes mid-execution, the caller receives whatever trail was captured up to the crash point, alongside the error. The trail is never lost.
+
+Entries emit synchronously at event boundaries, so the trail is always consistent up to the last completed event. A crash is inferred from the **absence of `workflow_ended`** plus the presence of an error — do not attempt to emit a `workflow_crashed` entry from a panic handler.
+
+**Per-language idiom:**
+- **TypeScript / Python:** Throw a custom `WorkflowError` exception that carries the partial envelope as a property.
+- **Ruby:** Raise a custom exception class with the partial envelope attached.
+- **Go:** Return `(*WorkflowEnvelope, error)` — envelope is non-nil with partial trail, error is non-nil with failure reason.
+
+---
+
+## Response Envelope
+
+Every workflow execution returns a **WorkflowEnvelope** — a standardized response structure that provides the result, per-step details, trail, and observability metrics.
+
+### WorkflowEnvelope
 
 ```typescript
 {
   workflow: string;
-  // The workflow name (from the YAML `name` field).
+  // The workflow name (from the YAML name field).
 
   version: string;
-  // The workflow version (from the YAML `version` field).
+  // The workflow version (from the YAML version field).
 
   request_id: string;
   // A UUID v4 generated for this execution. Use for logging, tracing,
   // and correlation.
 
-  status: 'success' | 'error' | 'short_circuited';
+  status: 'success' | 'error';
   // Overall execution status.
-  //   success         — all steps completed without error
-  //   error           — at least one step failed after retries/fallback
-  //   short_circuited — a step triggered an early exit via short_circuit
+  //   success — all executed steps completed without error
+  //   error   — at least one step failed after retries/fallback
 
   timestamps: {
     started_at: string;   // ISO 8601 timestamp when execution began
@@ -673,14 +827,19 @@ Every workflow execution returns a **WorkflowEnvelope** -- a standardized respon
     // Sum of output tokens across all LLM steps.
 
     steps_executed: number;
-    // Number of steps that actually ran (including retries and fallback).
+    // Number of steps that actually ran.
 
-    steps_skipped: number;
-    // Number of steps skipped due to short-circuit.
+    steps_not_executed: number;
+    // Number of steps not reached due to branching.
   };
 
   steps: StepResult[];
   // Ordered array of per-step results (see StepResult below).
+  // Includes entries for all declared steps, including those not reached.
+
+  trail: TrailEntry[];
+  // Ordered event log for debugging and audit.
+  // See "Trail Contract" above.
 
   result: Record<string, unknown>;
   // The resolved output bindings. This is the "business payload" of
@@ -692,37 +851,43 @@ Every workflow execution returns a **WorkflowEnvelope** -- a standardized respon
 }
 ```
 
-#### StepResult
+### StepResult
 
 ```typescript
 {
   id: string;
-  // The step ID (from the YAML `id` field).
+  // The step ID (from the YAML id field).
 
   agent: string;
-  // The agent ID that executed this step.
+  // The agent ID that executed this step. For workflow steps, this is
+  // the workflow name prefixed with "workflow:".
 
-  status: 'success' | 'skipped' | 'error';
+  status: 'success' | 'error' | 'not_executed' | 'partial_failure';
   // Per-step status.
-  //   success — the step completed (possibly after retries or with fallback)
-  //   skipped — the step was skipped due to short-circuit
-  //   error   — the step failed after all retries and fallback
+  //   success         — the step completed (possibly after retries or with fallback)
+  //   error           — the step failed after all retries and fallback
+  //   not_executed    — the step was not reached due to branching
+  //   partial_failure — for_each step where some iterations failed
 
   output: unknown;
-  // The step's output. For LLM agents, this is the parsed response
-  // (object if schema was used, string otherwise). For deterministic
-  // agents, this is the handler's return value. For skipped steps,
-  // this is the default value from short_circuit.defaults.
+  // The step's output. For LLM agents: parsed response (object if schema,
+  // string otherwise). For deterministic agents: handler return value.
+  // For not_executed steps: null. For for_each steps: array of per-iteration
+  // results (error slots contain { error: "..." }).
+
+  sub_envelope?: WorkflowEnvelope;
+  // Present only for workflow steps. Contains the full child workflow
+  // envelope (trail, steps, metrics) for debugging.
 
   metrics: {
     latency_ms: number;
     // Wall-clock time for this step (including retries).
 
     input_tokens: number;
-    // Input tokens used (0 for deterministic agents).
+    // Input tokens used (0 for deterministic agents, summed for for_each).
 
     output_tokens: number;
-    // Output tokens used (0 for deterministic agents).
+    // Output tokens used (0 for deterministic agents, summed for for_each).
   };
 
   attempts?: number;
@@ -730,8 +895,11 @@ Every workflow execution returns a **WorkflowEnvelope** -- a standardized respon
   // 1 = succeeded on first try, 2 = succeeded on first retry, etc.
 
   used_fallback?: boolean;
-  // true if the fallback agent was used. Only present if fallback
-  // was configured and used.
+  // true if the fallback agent was used. Only present when true.
+
+  fallback_reason?: string;
+  // The error message from the final retry attempt that triggered the
+  // fallback. Only present when used_fallback is true.
 
   error?: string;
   // Error message if the step failed.
@@ -817,7 +985,7 @@ Agentic App Spec follows a **protoc-inspired code generation pattern**. The YAML
 1. The `agentic build` command reads all `agent.yaml` and `workflow.yaml` files.
 2. For each agent, it generates a typed function and an input type/interface.
 3. For each workflow, it generates a typed function and an input type/interface.
-4. Generated files are placed alongside the YAML definitions (or in a configured output directory).
+4. Generated files are placed in the configured output directory (default: `src/generated/`).
 
 ### Type Mapping
 
@@ -843,15 +1011,18 @@ Agentic App Spec follows a **protoc-inspired code generation pattern**. The YAML
 
 ### Generated Output Examples
 
-#### TypeScript -- Agent Handle
+#### TypeScript — Agent Handle
 
 ```typescript
-// @generated from agents/review-analyzer/agent.yaml
+// @generated from agentic-spec/agents/review-analyzer/agent.yaml
 import { invokeAgent } from '../../engine/runner.js';
 import type { AgentResult } from '../../types.js';
 
 export interface ReviewAnalyzerInput {
-  product_data: Record<string, unknown>;
+  product_name: string;
+  category: string;
+  description: string;
+  reviews: string;
 }
 
 export async function reviewAnalyzer(input: ReviewAnalyzerInput): Promise<AgentResult> {
@@ -859,10 +1030,10 @@ export async function reviewAnalyzer(input: ReviewAnalyzerInput): Promise<AgentR
 }
 ```
 
-#### TypeScript -- Workflow Handle
+#### TypeScript — Workflow Handle
 
 ```typescript
-// @generated from workflows/product-review.yaml
+// @generated from agentic-spec/workflows/product-review.yaml
 import { orchestrate } from '../../engine/orchestrator.js';
 import type { WorkflowEnvelope } from '../../types.js';
 
@@ -877,6 +1048,26 @@ export async function productReview(input: ProductReviewInput): Promise<Workflow
 
 ---
 
+## Build-Time Validation
+
+`agentic build` performs comprehensive graph analysis on every workflow before generating code. All checks are **build-time failures** — the build aborts with a clear error message. No runtime surprises.
+
+### Validation Checks
+
+| Check                          | Description                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| **Reachability**               | Every declared step must be reachable from the entry point. Unreachable steps are build errors, not warnings.  |
+| **Target existence**           | Every `next:` target (goto, switch case, if/then/else) must reference a step ID that exists in the workflow.   |
+| **Cycle detection**            | Backward edges are detected. Cycles without a conditional exit (switch/if that breaks the cycle) are rejected. |
+| **Non-exhaustive conditions**  | `switch` blocks require a `default` case. `if` blocks require both `then` and `else`.                         |
+| **Parallel branch isolation**  | Steps in one parallel branch cannot reference outputs from sibling branches.                                   |
+| **requires: satisfaction**     | For every path into a step, all `requires:` entries (explicit or inferred) are satisfied by upstream steps.    |
+| **Trail isolation**            | Any binding starting with `$.trail` is rejected.                                                              |
+| **Sub-workflow cycles**        | A workflow cannot invoke itself (directly or transitively) via `workflow:` steps.                              |
+| **Config whitelist**           | `config:` overrides only allow `model`, `temperature`, `image_detail`. Other fields are rejected.             |
+
+---
+
 ## CLI
 
 The `agentic` CLI provides commands for initializing projects, scaffolding agents and workflows, generating code, and inspecting the project.
@@ -885,7 +1076,7 @@ The `agentic` CLI provides commands for initializing projects, scaffolding agent
 
 #### `agentic init`
 
-Initialize a new agentic project in the current directory. Creates the directory structure and optional config file.
+Initialize a new agentic project in the current directory.
 
 ```bash
 agentic init
@@ -895,9 +1086,10 @@ Creates:
 
 ```
 .
-├── agents/
-├── workflows/
-├── schemas/
+├── agentic-spec/
+│   ├── agents/
+│   ├── workflows/
+│   └── schemas/
 └── agentic.config.yaml
 ```
 
@@ -909,36 +1101,10 @@ Scaffold a new agent with the required files.
 agentic add agent <agent-id> [options]
 ```
 
-**Options:**
-
-
 | Flag      | Description                          | Default   |
 | --------- | ------------------------------------ | --------- |
 | `--type`  | Agent type: `llm` or `deterministic` | `llm`     |
 | `--model` | Model identifier (LLM agents only)   | `gpt-4.1` |
-
-
-**Examples:**
-
-```bash
-# Add an LLM agent with default model
-agentic add agent review-analyzer --type llm
-
-# Add an LLM agent with a specific model
-agentic add agent review-analyzer --type llm --model gpt-4.1-mini
-
-# Add a deterministic agent
-agentic add agent quality-scorer --type deterministic
-```
-
-Creates:
-
-```
-agents/
-└── review-analyzer/
-    ├── agent.yaml    # Pre-filled with type, model, and stub fields
-    └── prompt.md      # Empty system prompt (LLM only)
-```
 
 #### `agentic add workflow`
 
@@ -948,62 +1114,23 @@ Scaffold a new workflow with references to existing agents.
 agentic add workflow <name> [options]
 ```
 
-**Options:**
-
-
 | Flag       | Description                                           | Default  |
 | ---------- | ----------------------------------------------------- | -------- |
 | `--agents` | Comma-separated list of agent IDs to include as steps | *(none)* |
 
-
-**Examples:**
-
-```bash
-# Create a workflow with three agents
-agentic add workflow product-review --agents product-fetcher,review-analyzer,review-writer
-
-# Create an empty workflow
-agentic add workflow product-review
-```
-
-Creates:
-
-```
-workflows/
-└── product-review.yaml   # Pre-filled with steps referencing the specified agents
-```
-
 #### `agentic build`
 
-Generate typed integration handles from YAML definitions.
+Validate workflow graphs and generate typed integration handles from YAML definitions.
 
 ```bash
 agentic build [options]
 ```
 
-**Options:**
-
-
 | Flag     | Description                                           | Default      |
 | -------- | ----------------------------------------------------- | ------------ |
 | `--lang` | Target language: `typescript`, `python`, `ruby`, `go` | `typescript` |
 
-
-**Examples:**
-
-```bash
-# Generate TypeScript handles
-agentic build --lang typescript
-
-# Generate Python handles
-agentic build --lang python
-
-# Generate Ruby handles
-agentic build --lang ruby
-
-# Generate Go handles
-agentic build --lang go
-```
+The build step performs all [build-time validation checks](#build-time-validation) before generating code. If any check fails, the build aborts with a descriptive error and no files are written.
 
 #### `agentic list`
 
@@ -1011,20 +1138,6 @@ List all agents and workflows in the project.
 
 ```bash
 agentic list
-```
-
-**Example output:**
-
-```
-Agents:
-  product-fetcher    deterministic   handler: product-fetcher
-  review-analyzer    llm             model: gpt-4.1
-  comparison-researcher  llm         model: gpt-4.1
-  review-writer      llm             model: gpt-4.1
-  quality-scorer     deterministic   handler: scoring
-
-Workflows:
-  product-review     v1.0   5 steps (3 serial, 2 parallel)
 ```
 
 ---
@@ -1036,7 +1149,7 @@ The build step generates idiomatic code for each supported language. Below are c
 ### TypeScript
 
 ```typescript
-// @generated from agents/review-analyzer/agent.yaml
+// @generated from agentic-spec/agents/review-analyzer/agent.yaml
 import { invokeAgent } from '../../engine/runner.js';
 import type { AgentResult } from '../../types.js';
 
@@ -1055,7 +1168,7 @@ export async function reviewAnalyzer(input: ReviewAnalyzerInput): Promise<AgentR
 ### Python
 
 ```python
-# @generated from agents/review-analyzer/agent.yaml
+# @generated from agentic-spec/agents/review-analyzer/agent.yaml
 from dataclasses import dataclass
 from typing import Any
 from engine.runner import invoke_agent
@@ -1077,7 +1190,7 @@ async def review_analyzer(input: ReviewAnalyzerInput) -> AgentResult:
 ### Ruby
 
 ```ruby
-# @generated from agents/review-analyzer/agent.yaml
+# @generated from agentic-spec/agents/review-analyzer/agent.yaml
 module Agents
   ReviewAnalyzerInput = Struct.new(
     :product_name,
@@ -1096,7 +1209,7 @@ end
 ### Go
 
 ```go
-// @generated from agents/review-analyzer/agent.yaml
+// @generated from agentic-spec/agents/review-analyzer/agent.yaml
 package agents
 
 import engine "github.com/dcaponi/agentic-app-spec/runtime/go"
@@ -1115,298 +1228,34 @@ func ReviewAnalyzer(input ReviewAnalyzerInput) (*engine.AgentResult, error) {
 
 ---
 
-## Example Project: Product Review Pipeline
+## Example: Product Review Pipeline
 
-This is a complete, working example using [DummyJSON](https://dummyjson.com) (free, no authentication required). The pipeline fetches a product, analyzes its reviews, researches comparisons, writes a comprehensive review, and scores the quality.
+A complete pipeline that fetches a product, analyzes its reviews, researches comparisons, writes a comprehensive review, and scores quality. Demonstrates `parallel`, `if` branching, `retry`, and `fallback`.
 
 ### Pipeline Overview
 
 ```
-product-fetcher (serial, short-circuit if product not found)
+fetch (deterministic)
+  |
+  if: output.found
+  |        \
+  v         v
+parallel   not-found (terminates)
+  |- review-analyzer (retry 2x, fallback gpt-4.1-mini)
+  |- comparison-researcher (retry 2x, fallback gpt-4.1-mini)
   |
   v
-parallel:
-  |- review-analyzer (retry 2x, backoff 500ms, fallback to gpt-4.1-mini)
-  |- comparison-researcher (retry 2x, backoff 500ms, fallback to gpt-4.1-mini)
-  |
-  v
-review-writer (retry 3x, backoff 1000ms, fallback to gpt-4.1-mini)
+review-writer (retry 3x, fallback gpt-4.1-mini)
   |
   v
 quality-scorer (deterministic)
 ```
 
-### Agent Definitions
-
-#### 1. product-fetcher (deterministic)
-
-Calls `https://dummyjson.com/products/{id}` and extracts product data including reviews.
-
-`**agents/product-fetcher/agent.yaml**`
+### workflows/product-review.yaml
 
 ```yaml
-name: Product Fetcher
-description: Fetches product data and reviews from the DummyJSON API
-type: deterministic
-handler: product-fetcher
-input:
-  product_id:
-    type: number
-    required: true
-```
-
-The handler implementation (registered in your runtime):
-
-```typescript
-// handlers/product-fetcher.ts
-export async function productFetcherHandler(input: { product_id: number }) {
-  const res = await fetch(`https://dummyjson.com/products/${input.product_id}`);
-
-  if (!res.ok) {
-    return { found: false, error: `Product ${input.product_id} not found` };
-  }
-
-  const product = await res.json();
-
-  return {
-    found: true,
-    id: product.id,
-    title: product.title,
-    description: product.description,
-    category: product.category,
-    price: product.price,
-    rating: product.rating,
-    brand: product.brand,
-    reviews: JSON.stringify(product.reviews, null, 2),
-  };
-}
-```
-
-#### 2. review-analyzer (LLM)
-
-Analyzes reviews for sentiment, pros/cons, and common themes.
-
-`**agents/review-analyzer/agent.yaml**`
-
-```yaml
-name: Review Analyzer
-description: Analyzes product reviews for sentiment, pros/cons, and common themes
-type: llm
-model: gpt-4.1
-temperature: 0.2
-schema: ReviewAnalysis
-user_message: |
-  Analyze the following product reviews for "{{product_name}}" (category: {{category}}).
-
-  Product description: {{description}}
-
-  Reviews:
-  {{reviews}}
-input:
-  product_name:
-    type: string
-    required: true
-  category:
-    type: string
-    required: true
-  description:
-    type: string
-    required: true
-  reviews:
-    type: string
-    required: true
-```
-
-`**agents/review-analyzer/prompt.md**`
-
-```markdown
-You are an expert product review analyst. Your task is to analyze customer reviews
-and extract structured insights.
-
-## Guidelines
-
-- Determine the overall sentiment: positive, negative, mixed, or neutral
-- Identify specific pros and cons mentioned across reviews
-- Find common themes that recur across multiple reviews
-- Assign a score from 0-10 based on overall review sentiment
-- Be objective — report what reviewers said, do not add your own opinion
-
-## Handling Edge Cases
-
-- If there are no reviews, return neutral sentiment with score 5
-- If reviews are contradictory, mark sentiment as "mixed"
-- If reviews are in different languages, analyze all of them
-```
-
-#### 3. comparison-researcher (LLM)
-
-Generates comparisons with similar products based on the product category and LLM knowledge.
-
-`**agents/comparison-researcher/agent.yaml**`
-
-```yaml
-name: Comparison Researcher
-description: Researches and generates comparisons with similar products
-type: llm
-model: gpt-4.1
-temperature: 0.5
-schema: ComparisonResearch
-user_message: |
-  Research alternatives and comparisons for the following product:
-
-  Product: "{{product_name}}"
-  Category: {{category}}
-  Price: ${{price}}
-
-  Identify 2-3 comparable products and compare them on features,
-  price, and value proposition.
-input:
-  product_name:
-    type: string
-    required: true
-  category:
-    type: string
-    required: true
-  price:
-    type: number
-    required: true
-```
-
-`**agents/comparison-researcher/prompt.md**`
-
-```markdown
-You are a product comparison expert. Your job is to identify competing products
-and provide objective comparisons.
-
-## Guidelines
-
-- Identify 2-3 real, comparable products in the same category and price range
-- Compare on: features, build quality, price, value for money
-- Be specific — mention actual product names and concrete differences
-- Include a recommendation on when to choose each alternative
-- If you are unsure about specific details, say so rather than fabricating
-```
-
-#### 4. review-writer (LLM)
-
-Takes the analysis and comparison data and writes a comprehensive review.
-
-`**agents/review-writer/agent.yaml**`
-
-```yaml
-name: Review Writer
-description: Writes a comprehensive product review from analysis and comparison data
-type: llm
-model: gpt-4.1
-temperature: 0.7
-schema: null
-user_message: |
-  Write a comprehensive, engaging product review for "{{product_name}}" using
-  the following analysis and comparison data.
-
-  Review Analysis:
-  {{analysis}}
-
-  Product Comparisons:
-  {{comparisons}}
-
-  Write a review that is informative, balanced, and helpful for potential buyers.
-  Include sections for overview, pros/cons, how it compares to alternatives,
-  and a final verdict.
-input:
-  product_name:
-    type: string
-    required: true
-  analysis:
-    type: object
-    required: true
-  comparisons:
-    type: object
-    required: true
-```
-
-`**agents/review-writer/prompt.md**`
-
-```markdown
-You are a professional product reviewer. Write engaging, informative, and balanced
-product reviews.
-
-## Style Guide
-
-- Use a conversational but authoritative tone
-- Structure the review with clear sections: Overview, Pros, Cons, Comparisons, Verdict
-- Support claims with specific details from the analysis data
-- Be honest about weaknesses — readers trust balanced reviews
-- End with a clear verdict: who should buy this product and who should not
-- Target length: 500-800 words
-```
-
-#### 5. quality-scorer (deterministic)
-
-Scores the generated review on structure, completeness, and tone.
-
-`**agents/quality-scorer/agent.yaml**`
-
-```yaml
-name: Quality Scorer
-description: Scores the generated review on structure, completeness, and tone
-type: deterministic
-handler: scoring
-input:
-  review:
-    type: string
-    required: true
-```
-
-The handler implementation:
-
-```typescript
-// handlers/scoring.ts
-export function scoringHandler(input: { review: string }) {
-  const review = input.review;
-
-  // Structure: check for expected sections
-  const sections = ['overview', 'pros', 'cons', 'comparison', 'verdict'];
-  const foundSections = sections.filter(s =>
-    review.toLowerCase().includes(s)
-  );
-  const structureScore = Math.round((foundSections.length / sections.length) * 100);
-
-  // Completeness: check minimum length and content density
-  const wordCount = review.split(/\s+/).length;
-  const completenessScore = Math.min(100, Math.round((wordCount / 600) * 100));
-
-  // Tone: simple heuristic — check for balanced language
-  const positiveWords = (review.match(/great|excellent|good|impressive|solid/gi) || []).length;
-  const negativeWords = (review.match(/poor|bad|weak|lacking|disappointing/gi) || []).length;
-  const hasBalance = positiveWords > 0 && negativeWords > 0;
-  const toneScore = hasBalance ? 85 : 60;
-
-  const overall = Math.round((structureScore + completenessScore + toneScore) / 3);
-
-  return {
-    overall,
-    breakdown: {
-      structure: structureScore,
-      completeness: completenessScore,
-      tone: toneScore,
-    },
-    suggestions: [
-      ...(structureScore < 80 ? [`Missing sections: ${sections.filter(s => !review.toLowerCase().includes(s)).join(', ')}`] : []),
-      ...(completenessScore < 70 ? ['Review is too short — aim for 500-800 words'] : []),
-      ...(!hasBalance ? ['Review lacks balance — include both pros and cons'] : []),
-    ],
-  };
-}
-```
-
-### Workflow Definition
-
-`**workflows/product-review.yaml**`
-
-```yaml
-name: Product Review Pipeline
-description: Fetches a product from DummyJSON, analyzes reviews, researches comparisons, writes a comprehensive review, and scores quality
+name: product-review
+description: Fetches a product, analyzes reviews, and generates a comprehensive review
 version: "1.0"
 
 input:
@@ -1415,181 +1264,298 @@ input:
     required: true
 
 steps:
-  - id: product-fetcher
+  - id: fetch
     agent: product-fetcher
     input:
       product_id: $.input.product_id
-    short_circuit:
-      condition: "!output.found"
-      defaults:
-        review-analyzer:
-          sentiment: null
-          score: 0
-          pros: []
-          cons: []
-          themes: []
-          summary: "Product not found."
-        comparison-researcher:
-          comparisons: []
-        review-writer:
-          review: "Unable to generate review — product not found."
-        quality-scorer:
-          overall: 0
-          breakdown:
-            structure: 0
-            completeness: 0
-            tone: 0
-          suggestions: []
+    next:
+      if: output.found
+      then: research
+      else: not-found
+
+  - id: not-found
+    agent: not-found-responder
+    input:
+      product_id: $.input.product_id
 
   - parallel:
-    - id: review-analyzer
-      agent: review-analyzer
-      input:
-        product_name: $.steps.product-fetcher.output.title
-        category: $.steps.product-fetcher.output.category
-        description: $.steps.product-fetcher.output.description
-        reviews: $.steps.product-fetcher.output.reviews
-      retry:
-        max_attempts: 3
-        backoff_ms: 500
-      fallback:
-        agent: review-analyzer
-        config:
-          model: gpt-4.1-mini
+      id: research
+      join: all
+      branches:
+        - id: review-analysis
+          agent: review-analyzer
+          input:
+            product_name: $.steps.fetch.output.title
+            category: $.steps.fetch.output.category
+            description: $.steps.fetch.output.description
+            reviews: $.steps.fetch.output.reviews
+          retry:
+            max_attempts: 2
+            backoff_ms: 500
+          fallback:
+            agent: review-analyzer
+            config:
+              model: gpt-4.1-mini
 
-    - id: comparison-researcher
-      agent: comparison-researcher
-      input:
-        product_name: $.steps.product-fetcher.output.title
-        category: $.steps.product-fetcher.output.category
-        price: $.steps.product-fetcher.output.price
-      retry:
-        max_attempts: 3
-        backoff_ms: 500
-      fallback:
-        agent: comparison-researcher
-        config:
-          model: gpt-4.1-mini
+        - id: comparison
+          agent: comparison-researcher
+          input:
+            product_name: $.steps.fetch.output.title
+            category: $.steps.fetch.output.category
+            price: $.steps.fetch.output.price
+          retry:
+            max_attempts: 2
+            backoff_ms: 500
+          fallback:
+            agent: comparison-researcher
+            config:
+              model: gpt-4.1-mini
 
-  - id: review-writer
+  - id: article
     agent: review-writer
     input:
-      product_name: $.steps.product-fetcher.output.title
-      analysis: $.steps.review-analyzer.output
-      comparisons: $.steps.comparison-researcher.output
+      product_name: $.steps.fetch.output.title
+      analysis: $.steps.review-analysis.output
+      comparisons: $.steps.comparison.output
     retry:
-      max_attempts: 4
+      max_attempts: 3
       backoff_ms: 1000
     fallback:
       agent: review-writer
       config:
         model: gpt-4.1-mini
 
-  - id: quality-scorer
+  - id: quality
     agent: quality-scorer
     input:
-      review: $.steps.review-writer.output.review
+      review: $.steps.article.output
 
 output:
-  product: $.steps.product-fetcher.output
-  analysis: $.steps.review-analyzer.output
-  comparisons: $.steps.comparison-researcher.output
-  review: $.steps.review-writer.output.review
-  quality: $.steps.quality-scorer.output
+  product: $.steps.fetch.output
+  review_analysis: $.steps.review-analysis.output
+  comparison: $.steps.comparison.output
+  article: $.steps.article.output
+  quality_scores: $.steps.quality.output
 ```
 
-### Running the Example
+---
 
-```bash
-# Initialize the project
-agentic init
+## Example: Grocery Classification (switch)
 
-# Add agents
-agentic add agent product-fetcher --type deterministic
-agentic add agent review-analyzer --type llm --model gpt-4.1
-agentic add agent comparison-researcher --type llm --model gpt-4.1
-agentic add agent review-writer --type llm --model gpt-4.1
-agentic add agent quality-scorer --type deterministic
+Demonstrates hierarchical classification using `switch` branching — no routing agents needed. Each classifier is a regular agent with a schema constraining its output to an enum.
 
-# Add workflow
-agentic add workflow product-review --agents product-fetcher,review-analyzer,comparison-researcher,review-writer,quality-scorer
+### workflows/grocery-classify.yaml
 
-# Generate TypeScript handles
-agentic build --lang typescript
+```yaml
+name: grocery-classify
+description: Classifies grocery items through hierarchical branching
+version: "1.0"
 
-# Call the workflow (from your app code)
-# import { productReview } from './workflows/product-review/index.js';
-# const result = await productReview({ product_id: 1 });
+input:
+  item_name:
+    type: string
+    required: true
+
+steps:
+  - id: classify
+    agent: food-classifier
+    input:
+      item_name: $.input.item_name
+    next:
+      switch: output.category
+      cases:
+        food: classify-subtype
+        non_food: handle-non-food
+      default: unknown-item
+
+  - id: classify-subtype
+    agent: food-subtype-classifier
+    input:
+      item_name: $.input.item_name
+    next:
+      switch: output.subtype
+      cases:
+        meat: handle-meat
+        vegetable: handle-vegetable
+        canned: handle-canned
+      default: handle-generic-food
+
+  - id: handle-meat
+    agent: classify-meat
+    input:
+      item_name: $.input.item_name
+
+  - id: handle-vegetable
+    agent: classify-vegetable
+    input:
+      item_name: $.input.item_name
+
+  - id: handle-canned
+    agent: classify-canned
+    input:
+      item_name: $.input.item_name
+
+  - id: handle-generic-food
+    agent: classify-food
+    input:
+      item_name: $.input.item_name
+
+  - id: handle-non-food
+    agent: classify-non-food
+    input:
+      item_name: $.input.item_name
+
+  - id: unknown-item
+    agent: unknown-classifier
+    input:
+      item_name: $.input.item_name
+
+output:
+  classification: $.steps.classify.output
 ```
 
-### Expected Response Envelope
+The `food-classifier` agent returns `{ category: "food" | "non_food" | "unknown" }` via a schema. The `food-subtype-classifier` returns `{ subtype: "meat" | "vegetable" | "canned" | "other" }`. The switch picks the right specialist. No routing agent, no special agent type — just regular agents whose structured output drives workflow-level control flow.
 
-```json
-{
-  "workflow": "Product Review Pipeline",
-  "version": "1.0",
-  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "status": "success",
-  "timestamps": {
-    "started_at": "2026-03-22T10:00:00.000Z",
-    "completed_at": "2026-03-22T10:00:12.345Z"
-  },
-  "metrics": {
-    "total_latency_ms": 12345,
-    "total_input_tokens": 2150,
-    "total_output_tokens": 1830,
-    "steps_executed": 5,
-    "steps_skipped": 0
-  },
-  "steps": [
-    {
-      "id": "product-fetcher",
-      "agent": "product-fetcher",
-      "status": "success",
-      "output": { "found": true, "id": 1, "title": "Essence Mascara Lash Princess", "..." : "..." },
-      "metrics": { "latency_ms": 230, "input_tokens": 0, "output_tokens": 0 }
-    },
-    {
-      "id": "review-analyzer",
-      "agent": "review-analyzer",
-      "status": "success",
-      "output": { "sentiment": "positive", "score": 7.5, "pros": ["..."], "cons": ["..."], "themes": ["..."] },
-      "metrics": { "latency_ms": 4200, "input_tokens": 850, "output_tokens": 620 },
-      "attempts": 1
-    },
-    {
-      "id": "comparison-researcher",
-      "agent": "comparison-researcher",
-      "status": "success",
-      "output": { "comparisons": ["..."] },
-      "metrics": { "latency_ms": 3800, "input_tokens": 400, "output_tokens": 510 },
-      "attempts": 1
-    },
-    {
-      "id": "review-writer",
-      "agent": "review-writer",
-      "status": "success",
-      "output": { "review": "# Essence Mascara Lash Princess Review\n\n..." },
-      "metrics": { "latency_ms": 5100, "input_tokens": 900, "output_tokens": 700 },
-      "attempts": 1
-    },
-    {
-      "id": "quality-scorer",
-      "agent": "quality-scorer",
-      "status": "success",
-      "output": { "overall": 82, "breakdown": { "structure": 80, "completeness": 83, "tone": 85 }, "suggestions": [] },
-      "metrics": { "latency_ms": 5, "input_tokens": 0, "output_tokens": 0 }
-    }
-  ],
-  "result": {
-    "product": { "found": true, "id": 1, "title": "Essence Mascara Lash Princess", "..." : "..." },
-    "analysis": { "sentiment": "positive", "score": 7.5, "..." : "..." },
-    "comparisons": { "comparisons": ["..."] },
-    "review": "# Essence Mascara Lash Princess Review\n\n...",
-    "quality": { "overall": 82, "breakdown": { "..." : "..." }, "suggestions": [] }
-  }
-}
+---
+
+## Example: Iterative Refinement (loop)
+
+Demonstrates a write-review-revise cycle with bounded iteration.
+
+### workflows/draft-review.yaml
+
+```yaml
+name: draft-review
+description: Iteratively refines a review article until quality threshold is met
+version: "1.0"
+
+input:
+  product_data:
+    type: object
+    required: true
+  analysis:
+    type: object
+    required: true
+
+steps:
+  - loop:
+      id: refinement
+      max_iterations: 3
+      until: $.steps.review.output.is_satisfactory
+      steps:
+        - id: draft
+          agent: review-writer
+          input:
+            product: $.input.product_data
+            analysis: $.input.analysis
+            previous_draft: $.steps.draft.output
+            feedback: $.steps.review.output.feedback
+        - id: review
+          agent: quality-reviewer
+          input:
+            draft: $.steps.draft.output
+
+output:
+  final_draft: $.steps.draft.output
+  review_verdict: $.steps.review.output
 ```
+
+On the first iteration, `$.steps.draft.output` and `$.steps.review.output.feedback` resolve to `null`. Each subsequent iteration sees the prior output. The loop exits when the reviewer returns `is_satisfactory: true` or after 3 iterations.
+
+---
+
+## Example: Batch Analysis (for_each)
+
+Demonstrates dynamic fan-out over a runtime-determined list.
+
+### workflows/batch-analyze.yaml
+
+```yaml
+name: batch-analyze
+description: Extracts items from a document then analyzes each one
+version: "1.0"
+
+input:
+  document:
+    type: string
+    required: true
+
+steps:
+  - id: extract
+    agent: item-extractor
+    input:
+      document: $.input.document
+
+  - id: analyze-each
+    for_each: $.steps.extract.output.items
+    as: item
+    agent: item-analyzer
+    input:
+      data: "{{item}}"
+      context: $.steps.extract.output.context
+    max_concurrency: 5
+    retry:
+      max_attempts: 2
+      backoff_ms: 500
+
+  - id: summarize
+    agent: batch-summarizer
+    input:
+      results: $.steps.analyze-each.output
+
+output:
+  items: $.steps.extract.output.items
+  analyses: $.steps.analyze-each.output
+  summary: $.steps.summarize.output
+```
+
+The `item-extractor` returns `{ items: [...], context: "..." }`. The `for_each` step runs `item-analyzer` once per item (up to 5 concurrently). Failed iterations produce `{ error: "..." }` in their output slot. The `batch-summarizer` receives the full array of results.
+
+---
+
+## Future: Agent-Level Tool Use
+
+A planned extension that allows agents to invoke other agents as tools during their reasoning loop. This is distinct from workflow-level composition — it gives individual agents the ability to delegate sub-tasks to specialists as part of producing a single answer.
+
+### Planned agent.yaml Surface
+
+```yaml
+name: Research Coordinator
+type: llm
+model: gpt-4.1
+temperature: 0.3
+max_tool_iterations: 5
+tools:
+  - name: web-search
+    description: Search the web for current information
+    agent: web-searcher
+  - name: fact-check
+    description: Verify a claim against known sources
+    agent: fact-checker
+  - name: summarize
+    description: Summarize a long document
+    agent: summarizer
+```
+
+Each tool entry declares:
+- **name** — tool name presented to the LLM
+- **description** — what the tool does (sent to the LLM for tool selection)
+- **agent** — the agent ID to invoke when the LLM calls this tool
+
+The agent's `input` schema becomes the tool's input schema. The agent's output becomes the tool's return value.
+
+### Key Design Considerations
+
+This feature is intentionally deferred from the current release because it requires focused design work across several dimensions:
+
+1. **Trail contract expansion.** New event types needed: `tool_called`, `tool_returned`, `tool_failed`, `llm_turn`. A `tool_calls` field on `StepResult` for at-a-glance debugging.
+2. **Input and output schemas.** Both must be declared — the LLM needs to reason about return shapes, not just input shapes.
+3. **Iteration bounds.** Every tool-using agent needs `max_tool_iterations` to cap the internal reasoning loop.
+4. **Error semantics.** Tool failure within the loop: the LLM sees the error and can recover. Per-tool retry cap so one broken tool can't eat the iteration budget.
+5. **Workflow interaction.** If a tool-using agent exhausts its tool budget and fails, the workflow's fallback should still fire.
+6. **Observability.** `StepResult` should get a `tool_usage` summary (`{ total_calls, by_tool, iterations }`) so users can debug "why did this step take 40 seconds" without drilling into the trail.
+
+**Do not build patterns that depend on agent-level tool use.** The surface described above is directional but not finalized. Use workflow-level composition (sub-workflows, `for_each`, parallel branches) for multi-agent patterns until this feature ships.
 
 ---
 
@@ -1599,7 +1565,7 @@ agentic build --lang typescript
 
 The file-tree structure makes the spec **portable**, **version-controllable**, and **AI-readable**.
 
-- **Portable.** The entire agent/workflow configuration is plain files. Copy the `agents/` and `workflows/` directories to a new project and they work. No database, no registry service, no configuration server.
+- **Portable.** The entire agent/workflow configuration is plain files. Copy the `agentic-spec/` directory to a new project and it works. No database, no registry service, no configuration server.
 - **Version-controllable.** Every change to an agent or workflow is a Git diff. You can review prompt changes in PRs, bisect regressions, and roll back to any point in history.
 - **AI-readable.** AI coding assistants can read the directory structure, understand the relationships, and scaffold new agents or workflows without special tooling. The YAML format is the most common structured format in LLM training data.
 
@@ -1608,7 +1574,7 @@ The file-tree structure makes the spec **portable**, **version-controllable**, a
 - **Human-readable.** YAML is easier to read and write than JSON for configuration files, especially with multi-line strings (prompts).
 - **Widely supported.** Every language has a YAML parser. Every developer has seen YAML.
 - **Not code.** YAML separates configuration from implementation. You cannot accidentally put business logic in a YAML file. This forces clean separation of concerns.
-- **Comment support.** Unlike JSON, YAML supports comments -- critical for documenting configuration choices inline.
+- **Comment support.** Unlike JSON, YAML supports comments — critical for documenting configuration choices inline.
 
 ### Why code generation?
 
@@ -1624,16 +1590,24 @@ The protoc-inspired code generation pattern provides:
 The `WorkflowEnvelope` provides a **consistent contract** between the orchestrator and the caller:
 
 - **Observable.** Every execution includes timing, token counts, and per-step status. You can build dashboards, set alerts, and track costs without modifying agent code.
-- **Debuggable.** When something goes wrong, the envelope tells you which step failed, how many retries were attempted, whether the fallback was used, and what error occurred.
-- **Composable.** Because every workflow returns the same envelope shape, workflows can be nested or chained without special handling.
+- **Debuggable.** When something goes wrong, the envelope tells you which step failed, how many retries were attempted, whether the fallback was used, and what error occurred. The trail provides full event-level detail.
+- **Composable.** Because every workflow returns the same envelope shape, workflows can be nested (via `workflow:` steps) without special handling.
 
-### Why declarative retry/fallback/short-circuit?
+### Why "agents compute, workflows orchestrate"?
 
-Resilience logic (retry, fallback, short-circuit) is declared in the workflow YAML, not in agent code:
+The strict separation exists to keep agents **reusable** and **testable**:
 
-- **Separation of concerns.** Agents are pure functions -- they take input and produce output. They do not know about retries, fallbacks, or early exits. The orchestrator handles all resilience.
-- **Centralized control.** Changing retry behavior is a YAML edit, not a code change. No redeployment of agent code required.
-- **Testability.** Agents can be tested in isolation without mocking retry logic. The orchestrator can be tested with mock agents.
+- **Agents** are pure I/O units. They take input, produce output, and know nothing about workflow topology, branching logic, or other agents' existence. An agent can be tested in isolation with mock inputs.
+- **Workflows** own all control flow: sequencing, branching, parallelism, loops, fan-out. Changing how the pipeline works is a YAML edit, not a code change across multiple agents.
+- **No leaking.** The trail isolation rule (rejecting `$.trail` bindings) enforces this boundary at build time. An agent cannot implicitly access execution history, routing decisions, or other agents' metadata.
+
+### Why declarative retry/fallback?
+
+Resilience logic is declared in the workflow YAML, not in agent code:
+
+- **Separation of concerns.** Agents don't know about retries or fallbacks. The orchestrator handles all resilience.
+- **Centralized control.** Changing retry behavior is a YAML edit, not a code change.
+- **Testability.** Agents can be tested in isolation. The orchestrator can be tested with mock agents.
 
 ---
 
@@ -1641,63 +1615,75 @@ Resilience logic (retry, fallback, short-circuit) is declared in the workflow YA
 
 ### Agent Design
 
-- **Keep agents small and focused.** Each agent should do one thing well (single responsibility principle). If an agent's prompt is longer than 500 words, consider splitting it into multiple agents.
-- **Use descriptive IDs.** Use kebab-case names that describe the agent's purpose: `review-analyzer`, `sentiment-classifier`, `product-fetcher`. Avoid generic names like `agent1`, `step-2`, or `processor`.
-- **Put complex prompts in prompt.md.** The `user_message` field in `agent.yaml` should contain the template with interpolation placeholders. Long, detailed instructions belong in `prompt.md` (the system prompt).
-- **Use schemas for structured output.** Whenever you need to extract structured data from an LLM, define a schema. This eliminates parsing failures and guarantees the shape of the output.
+- **Keep agents small and focused.** Each agent should do one thing well. If an agent's prompt is longer than 500 words, consider splitting it.
+- **Use descriptive IDs.** Use kebab-case names that describe the agent's purpose: `review-analyzer`, `sentiment-classifier`, `product-fetcher`. Avoid `agent1`, `step-2`, `processor`.
+- **Put complex prompts in prompt.md.** The `user_message` field should contain the template with placeholders. Long instructions belong in `prompt.md` (the system prompt).
+- **Use schemas for structured output.** Whenever you need structured data from an LLM, define a schema. This eliminates parsing failures and guarantees the output shape.
+- **Use schemas to drive control flow.** For `switch` branching, constrain the agent's output to an enum via schema. The workflow `switch` dispatches on that value. This replaces the old routing agent pattern with a cleaner separation: the agent classifies, the workflow branches.
 
 ### Workflow Design
 
-- **Use short-circuit for early exit.** If a validation step can determine that the rest of the pipeline is pointless (e.g., "this is not a food image"), short-circuit immediately rather than wasting tokens on downstream steps.
-- **Use fallback for degraded quality over total failure.** A common pattern is to fall back from a more capable model (e.g., `gpt-4.1`) to a cheaper/faster model (e.g., `gpt-4.1-mini`). The output may be lower quality, but the workflow succeeds.
+- **Use `if` for early exit.** If a validation step can determine that the rest of the pipeline is pointless, branch to an exit step rather than proceeding.
+- **Use `switch` for classification.** When an agent classifies input into categories, use `switch` to dispatch to the appropriate handler. Each case is a step ID — no nesting required.
+- **Use `loop` for refinement.** Write-review-revise cycles, iterative improvement, and convergence loops all fit the `loop:` block. Always set a reasonable `max_iterations`.
+- **Use `for_each` for batches.** When a prior step produces a list, `for_each` maps an agent over it. Set `max_concurrency` to avoid rate-limiting.
+- **Use fallback for degraded quality over total failure.** A common pattern is to fall back from a capable model to a cheaper model. The output may be lower quality, but the workflow succeeds.
 - **Use retry for transient failures.** Rate limits, network timeouts, and temporary API errors are common. Retry with backoff handles these gracefully.
-- **Set backoff_ms appropriately.** Use 1000ms or more for rate limit errors (the provider needs time to reset). Use 500ms for network timeouts. Use 200ms for parse errors that might succeed on retry.
 
 ### Resilience Strategy Guide
 
 
-| Scenario                 | Strategy                    | Configuration                                                         |
-| ------------------------ | --------------------------- | --------------------------------------------------------------------- |
-| Rate limit (429)         | Retry with high backoff     | `retry: { max_attempts: 3, backoff_ms: 2000 }`                        |
-| Network timeout          | Retry with moderate backoff | `retry: { max_attempts: 3, backoff_ms: 500 }`                         |
-| Model quality issue      | Fallback to different model | `fallback: { agent: same, config: { model: "gpt-4.1-mini" } }`        |
-| Validation failure       | Short-circuit               | `short_circuit: { condition: "!output.is_valid", defaults: { ... } }` |
-| Intermittent parse error | Retry with low backoff      | `retry: { max_attempts: 2, backoff_ms: 200 }`                         |
-| Critical failure         | No retry, fail fast         | *(omit retry and fallback)*                                           |
+| Scenario                 | Strategy                    | Configuration                                                  |
+| ------------------------ | --------------------------- | -------------------------------------------------------------- |
+| Rate limit (429)         | Retry with high backoff     | `retry: { max_attempts: 3, backoff_ms: 2000 }`                |
+| Network timeout          | Retry with moderate backoff | `retry: { max_attempts: 3, backoff_ms: 500 }`                 |
+| Model quality issue      | Fallback to different model | `fallback: { agent: same, config: { model: "gpt-4.1-mini" }}` |
+| Validation failure       | Branch with `if`            | `next: { if: output.is_valid, then: continue, else: reject }` |
+| Intermittent parse error | Retry with low backoff      | `retry: { max_attempts: 2, backoff_ms: 200 }`                 |
+| Critical failure         | No retry, fail fast         | *(omit retry and fallback)*                                    |
 
 
 ### General
 
 - **Version your workflows.** Bump the `version` field when you change the workflow structure. This makes it easy to correlate response envelopes with specific workflow definitions.
-- **Use consistent naming.** If an agent is called `review-analyzer`, its schema should be `ReviewAnalysis` (not `SentimentResult`), and its handler (if deterministic) should be `review-analyzer`.
+- **Use consistent naming.** If an agent is called `review-analyzer`, its schema should be `ReviewAnalysis`, and its handler (if deterministic) should be `review-analyzer`.
 - **Test agents in isolation.** Each agent should be testable with mock inputs, independent of the workflow. Generate handles and write unit tests against them.
-- **Monitor via the envelope.** Use the `metrics` fields in the envelope to track latency, token usage, and failure rates. Set alerts on `steps_skipped` (unexpected short-circuits) and `used_fallback` (quality degradation).
+- **Monitor via the envelope.** Use the `metrics` fields to track latency, token usage, and failure rates. Set alerts on `steps_not_executed` (unexpected branching), `used_fallback` (quality degradation), and `partial_failure` (for_each issues).
+- **Use `requires:` for complex graphs.** In workflows with multiple `next:` branches, explicit `requires:` makes dependencies clear and catches missing-data bugs at build time rather than runtime.
 
 ---
 
 ## Glossary
 
 
-| Term                       | Definition                                                                                                                                                                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Agent**                  | A single unit of work in a pipeline. Either an LLM agent (calls a language model) or a deterministic agent (runs a handler function). Defined by an `agent.yaml` file and optionally a `prompt.md` file.                       |
-| **Agent ID**               | The unique identifier for an agent, derived from its directory name under `agents/`. Always kebab-case. Example: `review-analyzer`.                                                                                            |
-| **Binding**                | A path expression (e.g., `$.steps.review-analyzer.output.sentiment`) that references data in the execution context. Resolved at runtime just before a step executes.                                                           |
-| **Deterministic Handler**  | A registered function that executes without calling an LLM. Used for API calls, calculations, data transformations, and other logic that does not require a language model. Referenced by the `handler` field in `agent.yaml`. |
-| **Envelope**               | Short for **WorkflowEnvelope**. The standardized response structure returned by every workflow execution. Contains the result, per-step details, metrics, and status.                                                          |
-| **Execution Context**      | The runtime state maintained by the orchestrator during workflow execution. Accumulates step outputs as they complete, making them available to subsequent steps via bindings.                                                 |
-| **Fallback**               | A backup agent (or the same agent with different configuration) that runs if a step fails after all retry attempts. Configured via the `fallback` field on a workflow step. The fallback is attempted exactly once.            |
-| **Parallel Group**         | A set of steps declared under a `parallel` key in the workflow. All steps in the group execute concurrently, and the orchestrator waits for all to complete before proceeding.                                                 |
-| **Retry**                  | Automatic re-execution of a failed step. Configured with `max_attempts` (total tries including the first) and `backoff_ms` (base delay between attempts, multiplied by attempt number).                                        |
-| **Schema**                 | A Zod, Pydantic, or JSON Schema definition registered by name. When referenced by an agent, it forces the LLM to produce structured output conforming to the schema.                                                           |
-| **Schema Registry**        | A name-to-schema map that allows agents to reference schemas by string name rather than importing them directly.                                                                                                               |
-| **Short-circuit**          | An early exit mechanism. When a step's `short_circuit.condition` evaluates to true, all remaining steps are skipped and filled with default values. The workflow status becomes `short_circuited`.                             |
-| **Step**                   | A single node in a workflow. Each step invokes one agent with specific input bindings. Steps can be serial (one at a time) or grouped in parallel blocks.                                                                      |
-| **Step Result**            | The per-step record in the response envelope. Contains the step's ID, agent, status, output, metrics, and optional fields like `attempts`, `used_fallback`, and `error`.                                                       |
-| **Template Interpolation** | The `{{key}}` syntax used in `user_message` to inject runtime values into the user prompt. Supports nested paths (`{{key.sub.deep}}`).                                                                                         |
-| **Workflow**               | An orchestrated pipeline of steps (agents) with defined data flow, execution order, and resilience configuration. Defined by a YAML file in the `workflows/` directory.                                                        |
-| **Workflow Input**         | Parameters declared in the workflow's `input` section. Provided by the caller when invoking the workflow. Available to steps via `$.input.<key>` bindings.                                                                     |
-| **Workflow Output**        | The `output` section of a workflow definition. Maps named keys to binding expressions. Resolved after all steps complete and returned as the `result` field in the envelope.                                                   |
+| Term                       | Definition                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Agent**                  | A single unit of work. Either an LLM agent (calls a language model) or a deterministic agent (runs a handler function). Defined by `agent.yaml` and optionally `prompt.md`.                                         |
+| **Agent ID**               | Unique identifier derived from the directory name under `agentic-spec/agents/`. Always kebab-case.                                                                                                                 |
+| **Binding**                | A path expression (e.g., `$.steps.fetch.output.title`) that references data in the execution context. Resolved at runtime before a step executes.                                                                   |
+| **Branch**                 | One arm of a `parallel` block. Contains a sequential `steps` array. Branches execute concurrently.                                                                                                                  |
+| **Deterministic Handler**  | A registered function that executes without calling an LLM. Used for API calls, calculations, and data transformations.                                                                                             |
+| **Envelope**               | Short for **WorkflowEnvelope**. The standardized response structure returned by every workflow execution. Contains the result, step details, trail, metrics, and status.                                             |
+| **Execution Context**      | Runtime state maintained by the orchestrator. Accumulates step outputs, making them available to subsequent steps via bindings.                                                                                     |
+| **Fallback**               | A backup agent that runs if a step fails after all retries. Attempted exactly once. `fallback_reason` records why the fallback was triggered.                                                                       |
+| **for_each**               | Dynamic fan-out step that invokes an agent once per element in a runtime-determined array. Output is an array of per-iteration results.                                                                              |
+| **Loop**                   | A `loop:` block that repeats a set of steps until an `until` condition is met or `max_iterations` is reached.                                                                                                       |
+| **next:**                  | Control flow field on steps. Determines which step executes afterward. Supports goto (string), `switch` (value-based branching), and `if` (binary branching).                                                       |
+| **Parallel Block**         | A set of branches declared under `parallel:`. All branches execute concurrently with a configurable `join` strategy.                                                                                                |
+| **requires:**              | Optional field listing binding paths a step depends on. Enables build-time validation that all paths into the step satisfy its data dependencies.                                                                    |
+| **Retry**                  | Automatic re-execution of a failed step. Configured with `max_attempts` and `backoff_ms`.                                                                                                                           |
+| **Schema**                 | A Zod, Pydantic, or JSON Schema definition registered by name. Forces the LLM to produce structured output conforming to the schema.                                                                                |
+| **Schema Registry**        | A name-to-schema map that allows agents to reference schemas by string name.                                                                                                                                        |
+| **Step**                   | A single node in the workflow graph. Can be an agent step, workflow step, parallel block, loop block, or for_each step.                                                                                              |
+| **Step Result**            | Per-step record in the envelope. Contains status, output, metrics, and optional fields (attempts, fallback_reason, sub_envelope).                                                                                   |
+| **Sub-workflow**           | A workflow invoked by another workflow via a `workflow:` step. Its envelope embeds in the parent step result as `sub_envelope`.                                                                                     |
+| **switch:**                | Value-based branching sugar on `next:`. Evaluates an output field and jumps to the matching case.                                                                                                                    |
+| **Template Interpolation** | The `{{key}}` syntax used in `user_message` to inject runtime values into the user prompt.                                                                                                                           |
+| **Trail**                  | Ordered event log in the envelope. Records every significant execution event for debugging and audit. Not accessible to agents (trail isolation).                                                                    |
+| **Trail Isolation**        | Build-time rule rejecting `$.trail` bindings. The trail is for envelope consumers only, not agent inputs.                                                                                                            |
+| **Workflow**               | A directed graph of steps with defined data flow, control flow, and resilience configuration. Defined by a YAML file in `agentic-spec/workflows/`.                                                                   |
+| **Workflow Input**         | Parameters declared in the workflow's `input` section. Available to steps via `$.input.<key>` bindings.                                                                                                              |
+| **Workflow Output**        | The `output` section mapping keys to binding expressions. Resolved after execution and returned as the `result` field in the envelope.                                                                               |
 
 
 ---

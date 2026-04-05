@@ -1,53 +1,35 @@
 # frozen_string_literal: true
 
 module AgenticEngine
-  # Resolves $-path references and {{template}} placeholders used in workflow
-  # bindings and agent user_message templates.
-  #
-  # Context shape:
-  #   { "input" => { ... }, "steps" => { "step_id" => { "output" => ... } } }
   module Resolver
     class ResolutionError < StandardError; end
 
     class << self
       # Resolve a single $.path reference against a context hash.
-      #
-      # @param ref [String] e.g. "$.input.product_id" or "$.steps.fetch.output.title"
-      # @param context [Hash]
-      # @return [Object] the resolved value
+      # Supports: $.input.key, $.steps.sid.output.field, $.steps.sid.output[0],
+      # $.current (sugar for $.steps.__current.output)
       def resolve_ref(ref, context)
         return ref unless ref.is_a?(String) && ref.start_with?("$.")
 
-        parts = ref.sub(/^\$\./, "").split(".")
-        current = context
+        tokens = tokenize_path(ref.sub(/^\$\./, ""))
+        root = tokens.first
+        remaining = tokens[1..]
 
-        parts.each do |key|
-          case current
-          when Hash
-            # Try string keys first (YAML loads as strings), then symbols
-            if current.key?(key)
-              current = current[key]
-            elsif current.key?(key.to_sym)
-              current = current[key.to_sym]
-            else
-              raise ResolutionError, "Cannot resolve '#{ref}': key '#{key}' not found in #{current.keys.inspect}"
-            end
-          else
-            raise ResolutionError, "Cannot resolve '#{ref}': expected Hash at '#{key}', got #{current.class}"
-          end
+        case root
+        when "input"
+          traverse(context["input"], remaining)
+        when "current"
+          current_data = context.dig("steps", "__current")
+          return nil unless current_data
+          remaining.empty? ? current_data["output"] : traverse(current_data["output"], remaining)
+        when "steps"
+          traverse(context["steps"], remaining)
+        else
+          raise ResolutionError, "Unknown reference root '#{root}' in '#{ref}'"
         end
-
-        current
       end
 
       # Resolve all input bindings for a workflow step.
-      #
-      # Each value in +bindings+ is either a $.path string to resolve or a
-      # literal value to pass through.
-      #
-      # @param bindings [Hash] e.g. { "product_name" => "$.steps.fetch.output.title" }
-      # @param context [Hash]
-      # @return [Hash] resolved input hash
       def resolve_inputs(bindings, context)
         bindings.each_with_object({}) do |(key, value), resolved|
           resolved[key] = resolve_value(value, context)
@@ -55,10 +37,6 @@ module AgenticEngine
       end
 
       # Resolve output bindings for the final workflow result.
-      #
-      # @param bindings [Hash] e.g. { "product" => "$.steps.fetch.output" }
-      # @param context [Hash]
-      # @return [Hash]
       def resolve_outputs(bindings, context)
         bindings.each_with_object({}) do |(key, value), resolved|
           resolved[key] = resolve_value(value, context)
@@ -66,13 +44,6 @@ module AgenticEngine
       end
 
       # Interpolate {{key}} placeholders in a template string.
-      #
-      # Values are looked up from the +input+ hash.  Object/array values are
-      # JSON-serialized for inline substitution.
-      #
-      # @param template [String]
-      # @param input [Hash]
-      # @return [String]
       def resolve_template(template, input)
         return template unless template.is_a?(String)
 
@@ -92,8 +63,42 @@ module AgenticEngine
 
       private
 
-      # Resolve a value that may be a $.ref string, a nested hash/array of
-      # refs, or a plain literal.
+      # Tokenize a dotted path, splitting array indices.
+      # "steps.fetch.output[0].name" -> ["steps", "fetch", "output", "[0]", "name"]
+      def tokenize_path(path)
+        tokens = []
+        path.split(".").each do |part|
+          next if part.empty?
+          idx = part.index("[")
+          if idx
+            field = part[0...idx]
+            tokens << field unless field.empty?
+            tokens << part[idx..]  # e.g. "[0]"
+          else
+            tokens << part
+          end
+        end
+        tokens
+      end
+
+      # Walk a token path through nested hashes and arrays.
+      def traverse(current, tokens)
+        tokens.each do |token|
+          return nil if current.nil?
+
+          if token.start_with?("[") && token.end_with?("]")
+            idx = token[1..-2].to_i
+            return nil unless current.is_a?(Array) && idx >= 0 && idx < current.length
+            current = current[idx]
+          elsif current.is_a?(Hash)
+            current = current[token] || current[token.to_sym]
+          else
+            return nil
+          end
+        end
+        current
+      end
+
       def resolve_value(value, context)
         case value
         when String
@@ -107,7 +112,6 @@ module AgenticEngine
         end
       end
 
-      # Dig into a nested hash/struct using dot-separated key parts.
       def dig_value(obj, parts)
         current = obj
         parts.each do |key|

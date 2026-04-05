@@ -398,6 +398,22 @@ pub fn run(lang_opt: Option<&str>, outdir_opt: Option<&str>) {
         std::process::exit(1);
     }
 
+    // Validate all workflow YAML files before code generation
+    println!("Validating workflows...\n");
+    let (errors, warnings) = super::validate::validate_all(&root);
+    if errors > 0 {
+        eprintln!(
+            "\nValidation failed: {} error(s), {} warning(s). Fix errors before building.",
+            errors, warnings
+        );
+        std::process::exit(1);
+    }
+    if warnings > 0 {
+        println!("\nValidation passed with {} warning(s).\n", warnings);
+    } else {
+        println!();
+    }
+
     let agents = discover_agents(&root);
     let workflows = discover_workflows(&root);
 

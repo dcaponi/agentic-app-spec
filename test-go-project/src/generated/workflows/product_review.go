@@ -1,4 +1,4 @@
-// @generated from workflows/product-review.yaml — do not edit
+// @generated from agentic-spec/workflows/product-review.yaml — do not edit
 package workflows
 
 import engine "github.com/dcaponi/agentic-app-spec/runtime/go"

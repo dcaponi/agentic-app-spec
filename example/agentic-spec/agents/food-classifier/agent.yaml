@@ -1,0 +1,11 @@
+name: Food Classifier
+description: Classifies a grocery item as food or non-food
+type: llm
+model: gpt-4.1-mini
+temperature: 0
+schema: food_classification
+user_message: "Classify this grocery item as food or non-food.\n\nItem: {{item_name}}"
+input:
+  item_name:
+    type: string
+    required: true

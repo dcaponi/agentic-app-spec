@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Workflow Definition",
-  "description": "Schema for workflows/<name>.yaml",
+  "description": "Schema for workflows/<name>.yaml — flat-graph workflow with explicit control flow",
   "type": "object",
   "required": ["name", "version", "steps", "output"],
   "properties": {
@@ -37,12 +37,14 @@
     },
     "steps": {
       "type": "array",
-      "description": "Ordered list of workflow steps (serial or parallel groups)",
+      "description": "Ordered list of workflow steps. Default execution is top-to-bottom; use next: to override.",
       "items": {
         "oneOf": [
-          { "$ref": "#/definitions/step" },
-          { "$ref": "#/definitions/parallelGroup" },
-          { "$ref": "#/definitions/routeBlock" }
+          { "$ref": "#/definitions/agentStep" },
+          { "$ref": "#/definitions/workflowStep" },
+          { "$ref": "#/definitions/forEachStep" },
+          { "$ref": "#/definitions/parallelBlock" },
+          { "$ref": "#/definitions/loopBlock" }
         ]
       }
     },
@@ -55,153 +57,307 @@
     }
   },
   "definitions": {
-    "step": {
+
+    "nextField": {
+      "description": "Control flow: determines which step executes after this one. Omit for fall-through to the next step in the array.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Step ID to jump to (goto)"
+        },
+        { "$ref": "#/definitions/switchNext" },
+        { "$ref": "#/definitions/ifNext" }
+      ]
+    },
+
+    "switchNext": {
       "type": "object",
+      "description": "Value-based branching. Evaluates an expression against the step output and jumps to the matching case.",
+      "required": ["switch", "cases", "default"],
+      "properties": {
+        "switch": {
+          "type": "string",
+          "description": "Dot-path expression evaluated against the step output (e.g., output.category)"
+        },
+        "cases": {
+          "type": "object",
+          "description": "Map of value → step ID. Each key is a possible value of the switch expression.",
+          "additionalProperties": { "type": "string" }
+        },
+        "default": {
+          "type": "string",
+          "description": "Step ID when no case matches. Required to prevent non-exhaustive branches."
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ifNext": {
+      "type": "object",
+      "description": "Binary branching. Evaluates a condition expression against the step output.",
+      "required": ["if", "then", "else"],
+      "properties": {
+        "if": {
+          "type": "string",
+          "description": "Condition expression evaluated against the step output (e.g., output.found, !output.is_valid)"
+        },
+        "then": {
+          "type": "string",
+          "description": "Step ID when condition is truthy"
+        },
+        "else": {
+          "type": "string",
+          "description": "Step ID when condition is falsy"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "configOverride": {
+      "type": "object",
+      "description": "Step-level overrides for agent configuration. Only whitelisted fields are permitted.",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Override the agent's model (e.g., use a cheaper model for fallback)"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Override the agent's temperature"
+        },
+        "image_detail": {
+          "type": "string",
+          "enum": ["low", "high", "auto"],
+          "description": "Override vision detail level (only for image input agents)"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "retryConfig": {
+      "type": "object",
+      "description": "Retry configuration for transient failures",
+      "required": ["max_attempts", "backoff_ms"],
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total attempts including the first try"
+        },
+        "backoff_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Base delay between retries (multiplied by attempt number)"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "fallbackConfig": {
+      "type": "object",
+      "description": "Fallback agent if all retries fail. Executed once.",
+      "required": ["agent"],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "Fallback agent ID"
+        },
+        "config": {
+          "$ref": "#/definitions/configOverride",
+          "description": "Config overrides for the fallback agent"
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "inputBindings": {
+      "type": "object",
+      "description": "Input bindings: maps param names to $.path references or literal values",
+      "additionalProperties": {}
+    },
+
+    "requiresList": {
+      "type": "array",
+      "description": "Binding paths this step depends on. Used for build-time reachability validation. If omitted, inferred from input bindings.",
+      "items": { "type": "string" }
+    },
+
+    "agentStep": {
+      "type": "object",
+      "description": "Invokes a single agent",
       "required": ["id", "agent", "input"],
       "properties": {
         "id": {
           "type": "string",
-          "description": "Unique step identifier (used in bindings as $.steps.<id>)"
+          "description": "Unique step identifier (used in bindings as $.steps.<id> and as next: target)"
         },
         "agent": {
           "type": "string",
-          "description": "Agent ID (matches folder name in agents/)"
+          "description": "Agent ID (matches folder name in agentic-spec/agents/)"
         },
-        "input": {
-          "type": "object",
-          "description": "Input bindings: maps param names to $.path references or literal values",
-          "additionalProperties": {}
+        "input": { "$ref": "#/definitions/inputBindings" },
+        "config": { "$ref": "#/definitions/configOverride" },
+        "retry": { "$ref": "#/definitions/retryConfig" },
+        "fallback": { "$ref": "#/definitions/fallbackConfig" },
+        "requires": { "$ref": "#/definitions/requiresList" },
+        "next": { "$ref": "#/definitions/nextField" }
+      },
+      "additionalProperties": false
+    },
+
+    "workflowStep": {
+      "type": "object",
+      "description": "Invokes a sub-workflow. The sub-workflow envelope embeds in the parent step result under sub_envelope.",
+      "required": ["id", "workflow", "input"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique step identifier"
         },
-        "config": {
-          "type": "object",
-          "description": "Override agent config (model, temperature, etc.) for this step",
-          "properties": {
-            "provider": { "type": "string", "enum": ["openai", "anthropic"] },
-            "model": { "type": "string" },
-            "temperature": { "type": "number" }
-          }
+        "workflow": {
+          "type": "string",
+          "description": "Workflow name (matches filename in agentic-spec/workflows/)"
         },
+        "input": { "$ref": "#/definitions/inputBindings" },
+        "retry": { "$ref": "#/definitions/retryConfig" },
+        "fallback": { "$ref": "#/definitions/fallbackConfig" },
+        "requires": { "$ref": "#/definitions/requiresList" },
+        "next": { "$ref": "#/definitions/nextField" }
+      },
+      "additionalProperties": false
+    },
+
+    "forEachStep": {
+      "type": "object",
+      "description": "Dynamic fan-out: invokes an agent once per element in a runtime-determined array. Output is an array of per-iteration results in input-array order.",
+      "required": ["id", "for_each", "as", "agent", "input"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique step identifier"
+        },
+        "for_each": {
+          "type": "string",
+          "description": "Binding to an array (e.g., $.steps.extract.output.items)"
+        },
+        "as": {
+          "type": "string",
+          "description": "Loop variable name, available in input bindings via {{name}} interpolation"
+        },
+        "agent": {
+          "type": "string",
+          "description": "Agent ID to invoke per element"
+        },
+        "input": { "$ref": "#/definitions/inputBindings" },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum concurrent iterations. Omit to run all in parallel."
+        },
+        "config": { "$ref": "#/definitions/configOverride" },
         "retry": {
-          "type": "object",
-          "description": "Retry configuration",
-          "required": ["max_attempts", "backoff_ms"],
-          "properties": {
-            "max_attempts": {
-              "type": "integer",
-              "minimum": 1,
-              "description": "Total attempts including the first try"
-            },
-            "backoff_ms": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Base delay between retries (multiplied by attempt number)"
-            }
-          }
+          "$ref": "#/definitions/retryConfig",
+          "description": "Retry configuration per iteration (not the step as a whole)"
         },
         "fallback": {
-          "type": "object",
-          "description": "Fallback agent if all retries fail",
-          "required": ["agent"],
-          "properties": {
-            "agent": {
-              "type": "string",
-              "description": "Fallback agent ID"
-            },
-            "config": {
-              "type": "object",
-              "description": "Config overrides for the fallback agent"
-            }
-          }
+          "$ref": "#/definitions/fallbackConfig",
+          "description": "Fallback per iteration"
         },
-        "short_circuit": {
-          "type": "object",
-          "description": "Early exit condition — skips all remaining steps if true",
-          "required": ["condition", "defaults"],
-          "properties": {
-            "condition": {
-              "type": "string",
-              "description": "JavaScript expression with 'output' in scope (e.g., '!output.is_food')"
-            },
-            "defaults": {
-              "type": "object",
-              "description": "Default output values for each subsequent step ID that will be skipped"
-            }
-          }
-        }
-      }
+        "requires": { "$ref": "#/definitions/requiresList" },
+        "next": { "$ref": "#/definitions/nextField" }
+      },
+      "additionalProperties": false
     },
-    "parallelGroup": {
+
+    "parallelBlock": {
       "type": "object",
+      "description": "Concurrent execution of independent branches with a join strategy",
       "required": ["parallel"],
       "properties": {
         "parallel": {
-          "type": "array",
-          "description": "Steps that execute concurrently",
-          "items": { "$ref": "#/definitions/step" }
-        }
-      }
-    },
-    "routeBlock": {
-      "type": "object",
-      "required": ["route"],
-      "properties": {
-        "route": {
           "type": "object",
-          "required": ["id", "routing_agent", "input", "routes"],
+          "required": ["id", "branches"],
           "properties": {
             "id": {
               "type": "string",
-              "description": "Unique step identifier (used in bindings as $.steps.<id>)"
+              "description": "Unique step identifier for the parallel block"
             },
-            "routing_agent": {
+            "join": {
               "type": "string",
-              "description": "Routing agent ID (matches folder name in agentic-spec/routing-agents/)"
+              "enum": ["all", "any", "all_settled"],
+              "default": "all",
+              "description": "Join strategy: all (wait for every branch), any (first to complete wins, cancel rest), all_settled (wait for all, tolerate failures)"
             },
-            "input": {
-              "type": "object",
-              "description": "Input bindings: maps param names to $.path references or literal values",
-              "additionalProperties": {}
+            "branches": {
+              "type": "array",
+              "description": "Independent branches that execute concurrently. Each branch is a steps array (mini-workflow) or a bare step (sugar for single-step branch).",
+              "items": {
+                "oneOf": [
+                  { "$ref": "#/definitions/parallelBranch" },
+                  { "$ref": "#/definitions/agentStep" }
+                ]
+              },
+              "minItems": 2
             },
-            "routes": {
-              "type": "object",
-              "description": "Map of route keys to targets. Values can be: a string (agent ID with pass-through input), an object with 'agent' key, an object with 'workflow' key, an object with 'route' key (nested routing), or a _none bail-out with short_circuit+defaults.",
-              "additionalProperties": {}
-            },
-            "retry": {
-              "type": "object",
-              "description": "Retry configuration for the router decision (not the routed target)",
-              "required": ["max_attempts", "backoff_ms"],
-              "properties": {
-                "max_attempts": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "description": "Total attempts including the first try"
-                },
-                "backoff_ms": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "description": "Base delay between retries (multiplied by attempt number)"
-                }
-              }
-            },
-            "fallback": {
-              "type": "object",
-              "description": "Fallback router if all retries on the primary router fail",
-              "required": ["routing_agent"],
-              "properties": {
-                "routing_agent": {
-                  "type": "string",
-                  "description": "Routing agent ID (matches folder name in agentic-spec/routing-agents/)"
-                },
-                "config": {
-                  "type": "object",
-                  "description": "Config overrides for the fallback router"
-                }
-              }
-            }
-          }
+            "next": { "$ref": "#/definitions/nextField" }
+          },
+          "additionalProperties": false
         }
-      }
+      },
+      "additionalProperties": false
+    },
+
+    "parallelBranch": {
+      "type": "object",
+      "description": "A branch within a parallel block. Contains a sequential list of steps.",
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "description": "Sequential steps within this branch. Steps can reference earlier steps in the same branch but not sibling branches.",
+          "items": { "$ref": "#/definitions/agentStep" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "loopBlock": {
+      "type": "object",
+      "description": "Bounded iteration: repeats a set of steps until a condition is met or max_iterations is reached",
+      "required": ["loop"],
+      "properties": {
+        "loop": {
+          "type": "object",
+          "required": ["id", "max_iterations", "until", "steps"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Unique step identifier for the loop block"
+            },
+            "max_iterations": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum number of iterations (hard cap, prevents runaway loops)"
+            },
+            "until": {
+              "type": "string",
+              "description": "Binding expression evaluated after each iteration. Loop exits when truthy. (e.g., $.steps.review.output.is_satisfactory)"
+            },
+            "steps": {
+              "type": "array",
+              "description": "Steps to execute each iteration. Steps can reference their own prior outputs (overwritten each iteration).",
+              "items": { "$ref": "#/definitions/agentStep" },
+              "minItems": 1
+            },
+            "next": { "$ref": "#/definitions/nextField" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

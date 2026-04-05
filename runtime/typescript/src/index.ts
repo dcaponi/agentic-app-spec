@@ -8,15 +8,23 @@ export type {
 	AgentDefinition,
 	WorkflowDefinition,
 	WorkflowStep,
-	ParallelGroup,
+	ParallelBlock,
+	ParallelBranch,
+	LoopBlock,
+	ForEachBlock,
+	NextField,
+	SwitchNext,
+	IfNext,
+	TrailEntry,
 	WorkflowEntry,
 	ExecutionContext,
 	DeterministicHandler,
 	JsonSchemaObject,
 	RetryConfig,
 	FallbackConfig,
-	ShortCircuit,
 } from './types.js';
+
+export { WorkflowError } from './types.js';
 
 // ── Logger ──
 export { createLogger, serializeError } from './logger.js';

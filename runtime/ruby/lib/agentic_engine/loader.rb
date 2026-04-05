@@ -4,36 +4,24 @@ require "yaml"
 require "json"
 
 module AgenticEngine
-  # Loads agent definitions, workflow definitions, and JSON schemas from the
-  # project directory tree.  Walks upward from Dir.pwd looking for either
-  # agentic.config.yaml or an agents/ directory, then caches all loaded
-  # artefacts in module-level hashes.
   module Loader
-    @agents          = {} # { agent_id => AgentDefinition }
-    @workflows       = {} # { workflow_name => WorkflowDefinition }
-    @schemas         = {} # { schema_name => Hash (parsed JSON schema wrapper) }
-    @routing_agents  = {} # { routing_agent_id => RoutingAgentDefinition }
-    @root            = nil
+    @agents    = {}
+    @workflows = {}
+    @schemas   = {}
+    @root      = nil
 
     class << self
       attr_reader :agents, :workflows, :schemas
 
-      # Reset all caches (useful in tests).
       def reset!
         @agents.clear
         @workflows.clear
         @schemas.clear
-        @routing_agents.clear
         @root = nil
       end
 
       # ── Project root discovery ──
 
-      # Walk up from +start+ looking for agentic.config.yaml, agentic-spec/ dir,
-      # or agents/ dir.
-      #
-      # @param start [String] directory to begin searching from (default: Dir.pwd)
-      # @return [String, nil]
       def find_root(start = Dir.pwd)
         dir = File.expand_path(start)
         loop do
@@ -41,22 +29,17 @@ module AgenticEngine
           return dir if File.directory?(File.join(dir, "agentic-spec"))
           return dir if File.directory?(File.join(dir, "agents"))
           parent = File.dirname(dir)
-          return nil if parent == dir # reached filesystem root
+          return nil if parent == dir
           dir = parent
         end
       end
 
-      # Resolved project root (memoized).
       def root
-        @root ||= find_root or raise "Cannot locate agentic project root (no agentic.config.yaml or agents/ found)"
+        @root ||= find_root or raise "Cannot locate agentic project root"
       end
 
       # ── Agent loading ──
 
-      # Load a single agent by its directory-name ID (e.g. "review-analyzer").
-      #
-      # @param agent_id [String]
-      # @return [AgentDefinition]
       def load_agent(agent_id)
         return @agents[agent_id] if @agents.key?(agent_id)
 
@@ -90,47 +73,8 @@ module AgenticEngine
         @agents[agent_id] = definition
       end
 
-      # ── Routing agent loading ──
-
-      # Load a single routing agent by its directory-name ID (e.g. "content-classifier").
-      #
-      # @param routing_agent_id [String]
-      # @return [RoutingAgentDefinition]
-      def load_routing_agent(routing_agent_id)
-        return @routing_agents[routing_agent_id] if @routing_agents.key?(routing_agent_id)
-
-        routing_agent_dir = File.join(root, "agentic-spec", "routing-agents", routing_agent_id)
-        yaml_path = File.join(routing_agent_dir, "routing-agent.yaml")
-        raise "Routing agent not found: #{routing_agent_id} (looked in #{yaml_path})" unless File.exist?(yaml_path)
-
-        raw = YAML.safe_load(File.read(yaml_path), permitted_classes: [Symbol])
-
-        prompt = nil
-        prompt_path = File.join(routing_agent_dir, "prompt.md")
-        prompt = File.read(prompt_path).strip if File.exist?(prompt_path)
-
-        definition = RoutingAgentDefinition.new(
-          name:        raw["name"],
-          description: raw["description"],
-          strategy:    raw["strategy"],
-          base_url:    raw["base_url"],
-          api_key_env: raw["api_key_env"],
-          model:       raw["model"],
-          temperature: raw["temperature"],
-          handler:     raw["handler"],
-          prompt:      prompt,
-          input:       raw["input"] || {}
-        )
-
-        @routing_agents[routing_agent_id] = definition
-      end
-
       # ── Workflow loading ──
 
-      # Load a workflow by name (filename without .yaml).
-      #
-      # @param workflow_name [String]
-      # @return [WorkflowDefinition]
       def load_workflow(workflow_name)
         return @workflows[workflow_name] if @workflows.key?(workflow_name)
 
@@ -155,10 +99,6 @@ module AgenticEngine
 
       # ── Schema loading ──
 
-      # Load a JSON schema from schemas/<name>.json.
-      #
-      # @param schema_name [String]
-      # @return [Hash] the full schema wrapper (with "name", "strict", "schema" keys)
       def load_schema(schema_name)
         return @schemas[schema_name] if @schemas.key?(schema_name)
 
@@ -169,55 +109,131 @@ module AgenticEngine
         @schemas[schema_name] = parsed
       end
 
-      # Build a RouteBlock from a raw Hash (public so orchestrator can use it for
-      # nested route targets).
-      #
-      # @param raw [Hash]
-      # @return [RouteBlock]
-      def build_route_block(raw)
-        retry_config = if raw["retry"]
-                         { max_attempts: raw["retry"]["max_attempts"], backoff_ms: raw["retry"]["backoff_ms"] }
-                       end
-        fallback = if raw["fallback"]
-                     { routing_agent: raw["fallback"]["routing_agent"], config: raw["fallback"]["config"] }
-                   end
-
-        RouteBlock.new(
-          id:             raw["id"],
-          routing_agent:  raw["routing_agent"],
-          input:          raw["input"] || {},
-          routes:         raw["routes"] || {},
-          retry:          retry_config,
-          fallback:       fallback
-        )
-      end
-
       private
 
-      # Parse a single step entry which may be a plain step, a parallel group,
-      # or a route block.
       def parse_step_entry(entry)
         if entry.key?("parallel")
-          ParallelGroup.new(
-            parallel: entry["parallel"].map { |s| build_step(s) }
-          )
-        elsif entry.key?("route")
-          RouteEntry.new(route: build_route_block(entry["route"]))
+          parse_parallel_block(entry["parallel"])
+        elsif entry.key?("loop")
+          parse_loop_block(entry["loop"])
+        elsif entry.key?("for_each")
+          parse_for_each_block(entry["for_each"])
         else
-          build_step(entry)
+          parse_workflow_step(entry)
         end
       end
 
-      def build_step(raw)
+      def parse_workflow_step(raw)
         WorkflowStep.new(
-          id:            raw["id"],
-          agent:         raw["agent"],
-          input:         raw["input"] || {},
-          config:        raw["config"],
-          retry_config:  raw["retry"] ? { max_attempts: raw["retry"]["max_attempts"], backoff_ms: raw["retry"]["backoff_ms"] } : nil,
-          fallback:      raw["fallback"] ? { agent: raw["fallback"]["agent"], config: raw["fallback"]["config"] } : nil,
-          short_circuit: raw["short_circuit"] ? { condition: raw["short_circuit"]["condition"], defaults: raw["short_circuit"]["defaults"] } : nil
+          id:           raw["id"],
+          agent:        raw["agent"],
+          workflow:     raw["workflow"],
+          input:        raw["input"] || {},
+          config:       raw["config"],
+          retry_config: parse_retry(raw["retry"]),
+          fallback:     parse_fallback(raw["fallback"]),
+          requires:     raw["requires"] || [],
+          next_field:   parse_next(raw["next"])
         )
+      end
+
+      def parse_parallel_block(raw)
+        branches = (raw["branches"] || []).map do |b|
+          ParallelBranch.new(
+            id:           b["id"],
+            agent:        b["agent"],
+            workflow:     b["workflow"],
+            input:        b["input"] || {},
+            config:       b["config"],
+            retry_config: parse_retry(b["retry"]),
+            fallback:     parse_fallback(b["fallback"])
+          )
+        end
+
+        ParallelBlock.new(
+          id:         raw["id"],
+          join:       raw["join"] || "all",
+          branches:   branches,
+          next_field: parse_next(raw["next"])
+        )
+      end
+
+      def parse_loop_block(raw)
+        LoopBlock.new(
+          id:              raw["id"],
+          agent:           raw["agent"],
+          workflow:        raw["workflow"],
+          input:           raw["input"] || {},
+          config:          raw["config"],
+          until_condition: raw["until"],
+          max_iterations:  raw["max_iterations"] || 1,
+          retry_config:    parse_retry(raw["retry"]),
+          fallback:        parse_fallback(raw["fallback"]),
+          next_field:      parse_next(raw["next"])
+        )
+      end
+
+      def parse_for_each_block(raw)
+        ForEachBlock.new(
+          id:              raw["id"],
+          agent:           raw["agent"],
+          workflow:        raw["workflow"],
+          input:           raw["input"] || {},
+          config:          raw["config"],
+          collection:      raw["collection"],
+          max_concurrency: raw["max_concurrency"] || 0,
+          retry_config:    parse_retry(raw["retry"]),
+          fallback:        parse_fallback(raw["fallback"]),
+          next_field:      parse_next(raw["next"])
+        )
+      end
+
+      def parse_retry(raw)
+        return nil unless raw
+        RetryConfig.new(
+          max_attempts: raw["max_attempts"] || 1,
+          backoff_ms:   raw["backoff_ms"] || 0
+        )
+      end
+
+      def parse_fallback(raw)
+        return nil unless raw
+        FallbackConfig.new(
+          agent:    raw["agent"],
+          workflow: raw["workflow"],
+          config:   raw["config"] || {}
+        )
+      end
+
+      def parse_next(raw)
+        return nil if raw.nil?
+
+        # Simple string target
+        if raw.is_a?(String)
+          return NextField.new(target: raw)
+        end
+
+        if raw.is_a?(Hash)
+          if raw.key?("switch")
+            return NextField.new(switch: SwitchNext.new(
+              expression: raw["switch"],
+              cases:      raw["cases"] || {},
+              default:    raw["default"]
+            ))
+          end
+
+          if raw.key?("if")
+            return NextField.new(if_next: IfNext.new(
+              condition:   raw["if"],
+              then_target: raw["then"],
+              else_target: raw["else"]
+            ))
+          end
+
+          raise "next: mapping must contain 'switch' or 'if' key, got: #{raw.keys.inspect}"
+        end
+
+        raise "next: must be a string or mapping, got: #{raw.class}"
       end
     end
   end

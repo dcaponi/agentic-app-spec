@@ -1,4 +1,4 @@
-// @generated from agents/product-fetcher/agent.yaml — do not edit
+// @generated from agentic-spec/agents/product-fetcher/agent.yaml — do not edit
 package agents
 
 import engine "github.com/dcaponi/agentic-app-spec/runtime/go"

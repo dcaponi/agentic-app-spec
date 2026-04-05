@@ -18,12 +18,14 @@ from .logger import create_logger
 from .types import (
     AgentDefinition,
     FallbackConfig,
-    ParallelGroup,
+    ForEachBlock,
+    IfNext,
+    LoopBlock,
+    NextField,
+    ParallelBlock,
+    ParallelBranch,
     RetryConfig,
-    RouteBlock,
-    RouteEntry,
-    RoutingAgentDefinition,
-    ShortCircuit,
+    SwitchNext,
     WorkflowDefinition,
     WorkflowStep,
 )
@@ -36,7 +38,6 @@ log = create_logger("loader")
 _agent_cache: dict[str, AgentDefinition] = {}
 _workflow_cache: dict[str, WorkflowDefinition] = {}
 _schema_cache: dict[str, dict[str, Any]] = {}
-_routing_agent_cache: dict[str, RoutingAgentDefinition] = {}
 _project_root: str | None = None
 
 
@@ -63,7 +64,6 @@ def _find_project_root() -> str:
             return _project_root
         parent = current.parent
         if parent == current:
-            # Reached filesystem root without finding a marker.
             raise FileNotFoundError(
                 "Could not locate project root (no agentic.config.yaml, agentic-spec/, or agents/ directory found)."
             )
@@ -80,11 +80,7 @@ def get_project_root() -> str:
 # ---------------------------------------------------------------------------
 
 def load_agent(agent_id: str) -> AgentDefinition:
-    """Load an agent definition from ``agentic-spec/agents/<agent_id>/agent.yaml``.
-
-    If a ``prompt.md`` file exists alongside the YAML, its contents are stored
-    in the ``system_prompt`` field.
-    """
+    """Load an agent definition from ``agentic-spec/agents/<agent_id>/agent.yaml``."""
     if agent_id in _agent_cache:
         return _agent_cache[agent_id]
 
@@ -127,116 +123,84 @@ def load_agent(agent_id: str) -> AgentDefinition:
 
 
 # ---------------------------------------------------------------------------
-# Routing agent loading
-# ---------------------------------------------------------------------------
-
-def load_routing_agent(routing_agent_id: str) -> RoutingAgentDefinition:
-    """Load a routing-agent definition from ``agentic-spec/routing-agents/<id>/routing-agent.yaml``.
-
-    If a ``prompt.md`` file exists alongside the YAML, its contents are stored
-    in the ``prompt`` field.
-    """
-    if routing_agent_id in _routing_agent_cache:
-        return _routing_agent_cache[routing_agent_id]
-
-    root = get_project_root()
-    routing_agent_dir = os.path.join(root, "agentic-spec", "routing-agents", routing_agent_id)
-    yaml_path = os.path.join(routing_agent_dir, "routing-agent.yaml")
-
-    if not os.path.isfile(yaml_path):
-        raise FileNotFoundError(f"Routing agent definition not found: {yaml_path}")
-
-    with open(yaml_path, "r", encoding="utf-8") as fh:
-        raw: dict[str, Any] = yaml.safe_load(fh)
-
-    prompt_path = os.path.join(routing_agent_dir, "prompt.md")
-    prompt = ""
-    if os.path.isfile(prompt_path):
-        with open(prompt_path, "r", encoding="utf-8") as fh:
-            prompt = fh.read().strip()
-    elif raw.get("strategy", "llm") == "llm":
-        log.warn("LLM routing agent has no prompt.md — system prompt will be empty", routing_agent_id=routing_agent_id)
-
-    routing_agent_def = RoutingAgentDefinition(
-        name=raw.get("name", ""),
-        description=raw.get("description", ""),
-        strategy=raw.get("strategy", "llm"),
-        model=raw.get("model", ""),
-        temperature=float(raw.get("temperature", 0.0)),
-        handler=raw.get("handler", ""),
-        prompt=prompt,
-        input=raw.get("input"),
-        base_url=raw.get("base_url", ""),
-        api_key_env=raw.get("api_key_env", ""),
-    )
-
-    _routing_agent_cache[routing_agent_id] = routing_agent_def
-    log.debug("Loaded routing agent", routing_agent_id=routing_agent_id)
-    return routing_agent_def
-
-
-# ---------------------------------------------------------------------------
 # Workflow loading
 # ---------------------------------------------------------------------------
 
+def _parse_retry(raw: dict[str, Any] | None) -> RetryConfig | None:
+    if not raw:
+        return None
+    return RetryConfig(
+        max_attempts=int(raw.get("max_attempts", 1)),
+        backoff_ms=int(raw.get("backoff_ms", 0)),
+    )
+
+
+def _parse_fallback(raw: dict[str, Any] | None) -> FallbackConfig | None:
+    if not raw:
+        return None
+    return FallbackConfig(
+        agent=raw.get("agent", ""),
+        workflow=raw.get("workflow", ""),
+        config=raw.get("config", {}),
+    )
+
+
+def _parse_next(raw: Any) -> NextField | None:
+    """Parse a next: value from YAML into a NextField."""
+    if raw is None:
+        return None
+
+    # Simple string target
+    if isinstance(raw, str):
+        return NextField(target=raw)
+
+    if isinstance(raw, dict):
+        # switch: { switch, cases, default }
+        if "switch" in raw:
+            return NextField(switch=SwitchNext(
+                expression=raw["switch"],
+                cases=raw.get("cases", {}),
+                default=raw.get("default", ""),
+            ))
+
+        # if: { if, then, else }
+        if "if" in raw:
+            return NextField(if_=IfNext(
+                condition=raw["if"],
+                then=raw.get("then", ""),
+                else_=raw.get("else", ""),
+            ))
+
+        raise ValueError(f"next: mapping must contain 'switch' or 'if' key, got: {list(raw.keys())}")
+
+    raise ValueError(f"next: must be a string or mapping, got: {type(raw).__name__}")
+
+
 def _parse_step(raw: dict[str, Any]) -> WorkflowStep:
-    """Parse a raw step dict into a WorkflowStep dataclass."""
-    retry: RetryConfig | None = None
-    if "retry" in raw:
-        r = raw["retry"]
-        retry = RetryConfig(
-            max_attempts=int(r.get("max_attempts", 1)),
-            backoff_ms=int(r.get("backoff_ms", 0)),
-        )
-
-    fallback: FallbackConfig | None = None
-    if "fallback" in raw:
-        f = raw["fallback"]
-        fallback = FallbackConfig(
-            agent=f.get("agent", ""),
-            config=f.get("config", {}),
-        )
-
-    short_circuit: ShortCircuit | None = None
-    if "short_circuit" in raw:
-        sc = raw["short_circuit"]
-        short_circuit = ShortCircuit(
-            condition=sc.get("condition", ""),
-            defaults=sc.get("defaults", {}),
-        )
-
+    """Parse a raw step dict into a WorkflowStep."""
     return WorkflowStep(
         id=raw.get("id", ""),
         agent=raw.get("agent", ""),
+        workflow=raw.get("workflow", ""),
         input=raw.get("input", {}),
         config=raw.get("config", {}),
-        retry=retry,
-        fallback=fallback,
-        short_circuit=short_circuit,
+        retry=_parse_retry(raw.get("retry")),
+        fallback=_parse_fallback(raw.get("fallback")),
+        requires=raw.get("requires", []),
+        next=_parse_next(raw.get("next")),
     )
 
 
-def _parse_route_entry(raw: dict[str, Any]) -> RouteEntry:
-    """Parse a raw ``route`` block dict into a ``RouteEntry`` dataclass."""
-    retry: RetryConfig | None = None
-    if "retry" in raw:
-        r = raw["retry"]
-        retry = RetryConfig(
-            max_attempts=int(r.get("max_attempts", 1)),
-            backoff_ms=int(r.get("backoff_ms", 0)),
-        )
-
-    fallback: dict[str, Any] | None = raw.get("fallback")
-
-    route_block = RouteBlock(
+def _parse_parallel_branch(raw: dict[str, Any]) -> ParallelBranch:
+    return ParallelBranch(
         id=raw.get("id", ""),
-        routing_agent=raw.get("routing_agent", ""),
+        agent=raw.get("agent", ""),
+        workflow=raw.get("workflow", ""),
         input=raw.get("input", {}),
-        routes=raw.get("routes", {}),
-        retry=retry,
-        fallback=fallback,
+        config=raw.get("config", {}),
+        retry=_parse_retry(raw.get("retry")),
+        fallback=_parse_fallback(raw.get("fallback")),
     )
-    return RouteEntry(route=route_block)
 
 
 def load_workflow(workflow_name: str) -> WorkflowDefinition:
@@ -253,15 +217,50 @@ def load_workflow(workflow_name: str) -> WorkflowDefinition:
     with open(yaml_path, "r", encoding="utf-8") as fh:
         raw: dict[str, Any] = yaml.safe_load(fh)
 
-    steps: list[WorkflowStep | ParallelGroup | RouteEntry] = []
+    steps: list[WorkflowStep | ParallelBlock | LoopBlock | ForEachBlock] = []
     for entry in raw.get("steps", []):
         if "parallel" in entry:
-            group = ParallelGroup(
-                parallel=[_parse_step(s) for s in entry["parallel"]]
+            p = entry["parallel"]
+            block = ParallelBlock(
+                id=p.get("id", ""),
+                join=p.get("join", "all"),
+                branches=[_parse_parallel_branch(b) for b in p.get("branches", [])],
+                next=_parse_next(p.get("next")),
             )
-            steps.append(group)
-        elif "route" in entry:
-            steps.append(_parse_route_entry(entry["route"]))
+            steps.append(block)
+
+        elif "loop" in entry:
+            l = entry["loop"]
+            block = LoopBlock(
+                id=l.get("id", ""),
+                agent=l.get("agent", ""),
+                workflow=l.get("workflow", ""),
+                input=l.get("input", {}),
+                config=l.get("config", {}),
+                until=l.get("until", ""),
+                max_iterations=int(l.get("max_iterations", 1)),
+                retry=_parse_retry(l.get("retry")),
+                fallback=_parse_fallback(l.get("fallback")),
+                next=_parse_next(l.get("next")),
+            )
+            steps.append(block)
+
+        elif "for_each" in entry:
+            fe = entry["for_each"]
+            block = ForEachBlock(
+                id=fe.get("id", ""),
+                agent=fe.get("agent", ""),
+                workflow=fe.get("workflow", ""),
+                input=fe.get("input", {}),
+                config=fe.get("config", {}),
+                collection=fe.get("collection", ""),
+                max_concurrency=int(fe.get("max_concurrency", 0)),
+                retry=_parse_retry(fe.get("retry")),
+                fallback=_parse_fallback(fe.get("fallback")),
+                next=_parse_next(fe.get("next")),
+            )
+            steps.append(block)
+
         else:
             steps.append(_parse_step(entry))
 
@@ -306,11 +305,7 @@ _schemas_loaded = False
 
 
 def load_schema(schema_name: str) -> dict[str, Any]:
-    """Return a JSON schema dict by name.
-
-    On first call this eagerly loads all schemas from the ``schemas/``
-    directory.  Schemas registered via ``register_schema`` take priority.
-    """
+    """Return a JSON schema dict by name."""
     global _schemas_loaded
     if not _schemas_loaded:
         _load_all_schemas()
@@ -336,6 +331,5 @@ def clear_caches() -> None:
     _agent_cache.clear()
     _workflow_cache.clear()
     _schema_cache.clear()
-    _routing_agent_cache.clear()
     _project_root = None
     _schemas_loaded = False

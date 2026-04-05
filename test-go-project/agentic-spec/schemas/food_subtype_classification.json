@@ -1,0 +1,15 @@
+{
+  "name": "food_subtype_classification",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "subtype": {
+        "type": "string",
+        "enum": ["meat", "vegetable", "canned", "other"]
+      }
+    },
+    "required": ["subtype"],
+    "additionalProperties": false
+  }
+}

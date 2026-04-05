@@ -24,39 +24,72 @@ def resolve_ref(ref: str, context: ExecutionContext) -> Any:
     """Resolve a ``$.``-prefixed reference against the execution context.
 
     Supported forms:
-      - ``$.input.key``         -> context.input[key]
-      - ``$.steps.sid.output``  -> context.steps[sid]["output"]
-      - ``$.steps.sid.output.f`` -> context.steps[sid]["output"][f]
+      - ``$.input.key``              -> context.input[key]
+      - ``$.steps.sid.output``       -> context.steps[sid]["output"]
+      - ``$.steps.sid.output.f``     -> context.steps[sid]["output"][f]
+      - ``$.steps.sid.output[0]``    -> context.steps[sid]["output"][0]
+      - ``$.steps.sid.output[0].f``  -> context.steps[sid]["output"][0][f]
+      - ``$.current``                -> context.steps["__current"]["output"]
 
     If *ref* does not start with ``$.``, it is returned as a literal value.
     """
     if not isinstance(ref, str) or not ref.startswith("$."):
         return ref
 
-    parts = ref[2:].split(".")  # strip leading "$."
+    tokens = _tokenize_path(ref[2:])  # strip "$."
 
-    # Navigate into either context.input or context.steps
-    current: Any
-    root = parts[0]
+    root = tokens[0] if tokens else ""
+    remaining = tokens[1:]
+
     if root == "input":
-        current = context.input
-        parts = parts[1:]
+        return _traverse(context.input, remaining)
+    elif root == "current":
+        current_data = context.steps.get("__current", {})
+        val = current_data.get("output")
+        if remaining:
+            return _traverse(val, remaining)
+        return val
     elif root == "steps":
-        current = context.steps
-        parts = parts[1:]
+        return _traverse(context.steps, remaining)
     else:
-        raise ValueError(f"Unknown reference root '{root}' in '{ref}'")
+        raise ValueError(f"Unknown reference root '{root}' in '$.{'.'.join(tokens)}'")
 
-    for part in parts:
-        if isinstance(current, dict):
-            if part not in current:
-                raise KeyError(f"Reference '{ref}': key '{part}' not found in dict")
-            current = current[part]
-        elif isinstance(current, list):
-            current = current[int(part)]
+
+def _tokenize_path(path: str) -> list[str]:
+    """Split a dotted path, handling array indices like ``output[0]``.
+
+    ``steps.fetch.output[0].name`` -> ``["steps", "fetch", "output", "[0]", "name"]``
+    """
+    tokens: list[str] = []
+    for part in path.split("."):
+        if not part:
+            continue
+        idx = part.find("[")
+        if idx != -1:
+            field = part[:idx]
+            if field:
+                tokens.append(field)
+            tokens.append(part[idx:])  # e.g. "[0]"
         else:
-            current = getattr(current, part)
+            tokens.append(part)
+    return tokens
 
+
+def _traverse(current: Any, tokens: list[str]) -> Any:
+    """Walk a token path through nested dicts and lists."""
+    for token in tokens:
+        if current is None:
+            return None
+        if token.startswith("[") and token.endswith("]"):
+            idx = int(token[1:-1])
+            if isinstance(current, list) and 0 <= idx < len(current):
+                current = current[idx]
+            else:
+                return None
+        elif isinstance(current, dict):
+            current = current.get(token)
+        else:
+            return None
     return current
 
 

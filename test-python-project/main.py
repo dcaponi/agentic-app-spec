@@ -7,7 +7,7 @@ import sys
 
 from generated.workflows.groceryClassify import grocery_classify, GroceryClassifyInput
 
-# Set project root so the engine finds agents/workflows/routers here
+# Set project root so the engine finds agents/workflows here
 project_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(project_dir)
 

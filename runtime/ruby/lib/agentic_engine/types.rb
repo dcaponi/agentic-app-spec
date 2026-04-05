@@ -14,27 +14,43 @@ module AgenticEngine
     end
   end
 
+  TrailEntry = Struct.new(
+    :step_id,
+    :event,
+    :timestamp,
+    :data,
+    keyword_init: true
+  ) do
+    def to_h
+      h = { step_id: step_id, event: event, timestamp: timestamp }
+      h[:data] = data unless data.nil?
+      h
+    end
+  end
+
   StepResult = Struct.new(
     :id,
     :agent,
-    :status,        # "success" | "skipped" | "error"
+    :workflow,
+    :status,          # "success" | "error" | "not_executed" | "partial_failure"
     :output,
-    :metrics,       # StepMetrics (or hash)
+    :metrics,         # StepMetrics
     :attempts,
     :used_fallback,
+    :fallback_reason,
+    :sub_envelope,    # Hash (workflow envelope for sub-workflows)
     :error,
     keyword_init: true
   ) do
     def to_h
-      h = {
-        id: id,
-        agent: agent,
-        status: status,
-        output: output,
-        metrics: metrics.is_a?(StepMetrics) ? metrics.to_h : metrics
-      }
+      h = { id: id, status: status, output: output,
+            metrics: metrics.is_a?(StepMetrics) ? metrics.to_h : (metrics || {}) }
+      h[:agent] = agent unless agent.nil? || agent.empty?
+      h[:workflow] = workflow unless workflow.nil? || workflow.empty?
       h[:attempts] = attempts unless attempts.nil?
       h[:used_fallback] = used_fallback unless used_fallback.nil?
+      h[:fallback_reason] = fallback_reason unless fallback_reason.nil? || fallback_reason.empty?
+      h[:sub_envelope] = sub_envelope unless sub_envelope.nil?
       h[:error] = error unless error.nil?
       h
     end
@@ -44,27 +60,35 @@ module AgenticEngine
     :workflow,
     :version,
     :request_id,
-    :status,        # "success" | "error" | "short_circuited"
+    :status,        # "success" | "error" | "partial_failure"
     :timestamps,    # { started_at:, completed_at: }
     :metrics,       # { total_latency_ms:, total_input_tokens:, ... }
     :steps,         # Array of StepResult
+    :trail,         # Array of TrailEntry
     :result,
     :error,
     keyword_init: true
   ) do
     def to_h
       h = {
-        workflow: workflow,
-        version: version,
-        request_id: request_id,
-        status: status,
-        timestamps: timestamps,
-        metrics: metrics,
+        workflow: workflow, version: version, request_id: request_id,
+        status: status, timestamps: timestamps, metrics: metrics,
         steps: steps.map { |s| s.is_a?(StepResult) ? s.to_h : s },
+        trail: trail.map { |t| t.is_a?(TrailEntry) ? t.to_h : t },
         result: result
       }
       h[:error] = error unless error.nil?
       h
+    end
+  end
+
+  # Wraps a workflow failure with the partial envelope (including trail).
+  class WorkflowError < StandardError
+    attr_reader :envelope
+
+    def initialize(message, envelope: nil)
+      super(message)
+      @envelope = envelope
     end
   end
 
@@ -81,69 +105,54 @@ module AgenticEngine
   # ── Engine-internal types ──
 
   AgentDefinition = Struct.new(
-    :name,
-    :description,
-    :type,           # "llm" | "deterministic"
-    :base_url,       # optional OpenAI-compatible base URL
-    :api_key_env,    # env var name for the API key
-    :model,
-    :temperature,
-    :input_type,     # "image" | "text"
-    :image_detail,   # "low" | "high" | "auto"
-    :schema,         # schema name or nil
-    :user_message,
-    :handler,        # deterministic handler name
-    :prompt,         # loaded from prompt.md
-    :input,          # { param_name => { "type" => ..., "required" => ... } }
+    :name, :description, :type, :base_url, :api_key_env, :model,
+    :temperature, :input_type, :image_detail, :schema, :user_message,
+    :handler, :prompt, :input,
     keyword_init: true
   )
 
   WorkflowDefinition = Struct.new(
-    :name,
-    :description,
-    :version,
-    :input,          # { param_name => { "type" => ..., "required" => ... } }
-    :steps,          # Array of WorkflowStep or ParallelGroup hashes
-    :output,         # { key => "$.path" }
+    :name, :description, :version,
+    :input,   # { param_name => { "type" => ..., "required" => ... } }
+    :steps,   # Array of WorkflowStep, ParallelBlock, LoopBlock, or ForEachBlock
+    :output,  # { key => "$.path" }
     keyword_init: true
   )
+
+  # Control flow types
+  SwitchNext = Struct.new(:expression, :cases, :default, keyword_init: true)
+  IfNext = Struct.new(:condition, :then_target, :else_target, keyword_init: true)
+  NextField = Struct.new(:target, :switch, :if_next, keyword_init: true)
+
+  RetryConfig = Struct.new(:max_attempts, :backoff_ms, keyword_init: true)
+  FallbackConfig = Struct.new(:agent, :workflow, :config, keyword_init: true)
 
   WorkflowStep = Struct.new(
-    :id,
-    :agent,
-    :input,          # { param => "$.path" or literal }
-    :config,         # optional overrides
-    :retry_config,   # { max_attempts:, backoff_ms: }
-    :fallback,       # { agent:, config: }
-    :short_circuit,  # { condition:, defaults: }
+    :id, :agent, :workflow, :input, :config,
+    :retry_config, :fallback, :requires, :next_field,
     keyword_init: true
   )
 
-  ParallelGroup = Struct.new(
-    :parallel,       # Array of WorkflowStep
+  ParallelBranch = Struct.new(
+    :id, :agent, :workflow, :input, :config,
+    :retry_config, :fallback,
     keyword_init: true
   )
 
-  RoutingAgentDefinition = Struct.new(
-    :name, :description, :strategy, :base_url, :api_key_env, :model,
-    :temperature, :handler, :prompt, :input,
-    keyword_init: true
-  ) do
-    def to_h
-      super.compact
-    end
-  end
-
-  RouteBlock = Struct.new(
-    :id, :routing_agent, :input, :routes, :retry, :fallback,
+  ParallelBlock = Struct.new(
+    :id, :join, :branches, :next_field,
     keyword_init: true
   )
 
-  RouteEntry = Struct.new(:route, keyword_init: true)
+  LoopBlock = Struct.new(
+    :id, :agent, :workflow, :input, :config,
+    :until_condition, :max_iterations, :retry_config, :fallback, :next_field,
+    keyword_init: true
+  )
 
-  RouteOutput = Struct.new(:route, :router_output, :result, keyword_init: true) do
-    def to_h
-      { route: route, router_output: router_output, result: result }
-    end
-  end
+  ForEachBlock = Struct.new(
+    :id, :agent, :workflow, :input, :config,
+    :collection, :max_concurrency, :retry_config, :fallback, :next_field,
+    keyword_init: true
+  )
 end

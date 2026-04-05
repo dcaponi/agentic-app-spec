@@ -19,7 +19,6 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 		return nil, fmt.Errorf("failed to load workflow: %w", err)
 	}
 
-	// Pre-load all agents
 	if _, err := LoadAllAgents(); err != nil {
 		orchLog.Warn("could not pre-load all agents", map[string]interface{}{"error": err.Error()})
 	}
@@ -38,75 +37,64 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 		},
 		Metrics: map[string]interface{}{},
 		Steps:   []StepResult{},
+		Trail:   []TrailEntry{},
 		Status:  "success",
 	}
 
-	shortCircuited := false
-	var shortCircuitDefaults map[string]interface{}
+	// Build step index for graph traversal
+	stepIndex := buildStepIndex(wfDef.Steps)
+	executedSteps := map[string]bool{}
 
-	for _, rawStep := range wfDef.Steps {
-		if shortCircuited {
-			// Fill remaining steps with skipped status
-			switch s := rawStep.(type) {
-			case *WorkflowStep:
-				envelope.Steps = append(envelope.Steps, buildSkippedResult(s.ID, s.Agent, shortCircuitDefaults))
-				populateCtxFromDefaults(ctx, s.ID, shortCircuitDefaults)
-			case *ParallelGroup:
-				for _, ps := range s.Parallel {
-					envelope.Steps = append(envelope.Steps, buildSkippedResult(ps.ID, ps.Agent, shortCircuitDefaults))
-					populateCtxFromDefaults(ctx, ps.ID, shortCircuitDefaults)
-				}
-			case *RouteBlock:
-				envelope.Steps = append(envelope.Steps, buildSkippedResult(s.ID, "routing-agent:"+s.RoutingAgent, shortCircuitDefaults))
-				populateCtxFromDefaults(ctx, s.ID, shortCircuitDefaults)
-			}
-			continue
-		}
+	// Graph traversal: start at step 0, follow next: edges
+	cursor := 0
+	for cursor < len(wfDef.Steps) {
+		rawStep := wfDef.Steps[cursor]
+		stepID := getStepID(rawStep)
+		executedSteps[stepID] = true
+
+		var nextTarget string
+		var stepErr error
 
 		switch s := rawStep.(type) {
 		case *WorkflowStep:
-			result := executeStepWithRetry(s, ctx)
-			envelope.Steps = append(envelope.Steps, *result)
-			if result.Status == "success" {
-				ctx.Steps[s.ID] = map[string]interface{}{"output": result.Output}
-			}
-			// Check short-circuit
-			if s.ShortCircuit != nil && result.Status == "success" {
-				if evaluateCondition(s.ShortCircuit.Condition, result.Output) {
-					shortCircuited = true
-					shortCircuitDefaults = s.ShortCircuit.Defaults
-					envelope.Status = "short_circuited"
-				}
-			}
+			nextTarget, stepErr = executeWorkflowStep(s, ctx, envelope)
+		case *ParallelBlock:
+			nextTarget, stepErr = executeParallelBlock(s, ctx, envelope)
+		case *LoopBlock:
+			nextTarget, stepErr = executeLoopBlock(s, ctx, envelope)
+		case *ForEachBlock:
+			nextTarget, stepErr = executeForEachBlock(s, ctx, envelope)
+		}
 
-		case *ParallelGroup:
-			results := executeParallelSteps(s, ctx)
-			for i, result := range results {
-				envelope.Steps = append(envelope.Steps, *result)
-				stepID := s.Parallel[i].ID
-				if result.Status == "success" {
-					ctx.Steps[stepID] = map[string]interface{}{"output": result.Output}
-				}
-			}
+		if stepErr != nil {
+			envelope.Status = "error"
+			envelope.Error = stepErr.Error()
+			break
+		}
 
-		case *RouteBlock:
-			result := executeRoute(s, ctx)
-			envelope.Steps = append(envelope.Steps, *result)
-			if result.Status == "success" || result.Status == "short_circuited" {
-				ctx.Steps[s.ID] = map[string]interface{}{"output": result.Output}
+		// Resolve next step
+		if nextTarget == "_end" {
+			break
+		}
+		if nextTarget != "" {
+			idx, ok := stepIndex[nextTarget]
+			if !ok {
+				envelope.Status = "error"
+				envelope.Error = fmt.Sprintf("next target %q not found", nextTarget)
+				break
 			}
-			if result.Status == "short_circuited" {
-				shortCircuited = true
-				// Extract defaults from the _none target if present
-				if noneTarget, ok := s.Routes["_none"]; ok {
-					if noneMap, ok := noneTarget.(map[string]interface{}); ok {
-						if defaults, ok := noneMap["defaults"].(map[string]interface{}); ok {
-							shortCircuitDefaults = defaults
-						}
-					}
-				}
-				envelope.Status = "short_circuited"
-			}
+			cursor = idx
+		} else {
+			// Fall through to next step in array
+			cursor++
+		}
+	}
+
+	// Mark non-executed steps
+	for _, rawStep := range wfDef.Steps {
+		stepID := getStepID(rawStep)
+		if !executedSteps[stepID] {
+			markNotExecuted(rawStep, envelope)
 		}
 	}
 
@@ -115,29 +103,7 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 		envelope.Result = ResolveOutputs(wfDef.Output, ctx)
 	}
 
-	endTime := time.Now().UTC()
-	envelope.Timestamps["completed_at"] = endTime.Format(time.RFC3339)
-	envelope.Metrics["total_latency_ms"] = float64(endTime.Sub(startTime).Milliseconds())
-
-	// Calculate totals
-	var totalInput, totalOutput int
-	for _, sr := range envelope.Steps {
-		totalInput += sr.Metrics.InputTokens
-		totalOutput += sr.Metrics.OutputTokens
-	}
-	envelope.Metrics["total_input_tokens"] = totalInput
-	envelope.Metrics["total_output_tokens"] = totalOutput
-
-	// Check for any step errors
-	if envelope.Status == "success" {
-		for _, sr := range envelope.Steps {
-			if sr.Status == "error" {
-				envelope.Status = "error"
-				envelope.Error = fmt.Sprintf("step %s failed: %s", sr.ID, sr.Error)
-				break
-			}
-		}
-	}
+	finalizeEnvelope(envelope, startTime)
 
 	orchLog.Info("workflow completed", map[string]interface{}{
 		"workflow": wfDef.Name,
@@ -145,45 +111,168 @@ func Orchestrate(workflowName string, input interface{}) (*WorkflowEnvelope, err
 		"latency":  envelope.Metrics["total_latency_ms"],
 	})
 
+	if envelope.Status == "error" {
+		return envelope, &WorkflowError{
+			Err:      fmt.Errorf("%s", envelope.Error),
+			Envelope: envelope,
+		}
+	}
+
 	return envelope, nil
 }
 
-func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult {
+// buildStepIndex creates a map from step ID to array index for O(1) lookups.
+func buildStepIndex(steps []interface{}) map[string]int {
+	index := make(map[string]int, len(steps))
+	for i, s := range steps {
+		id := getStepID(s)
+		if id != "" {
+			index[id] = i
+		}
+		// Also index parallel branch IDs to their parent parallel block index
+		if pb, ok := s.(*ParallelBlock); ok {
+			for _, branch := range pb.Branches {
+				if branch.ID != "" {
+					index[branch.ID] = i
+				}
+			}
+		}
+	}
+	return index
+}
+
+// getStepID returns the ID of any step type.
+func getStepID(s interface{}) string {
+	switch v := s.(type) {
+	case *WorkflowStep:
+		return v.ID
+	case *ParallelBlock:
+		return v.ID
+	case *LoopBlock:
+		return v.ID
+	case *ForEachBlock:
+		return v.ID
+	}
+	return ""
+}
+
+// getNextField returns the NextField of any step type.
+func getNextField(s interface{}) *NextField {
+	switch v := s.(type) {
+	case *WorkflowStep:
+		return v.Next
+	case *ParallelBlock:
+		return v.Next
+	case *LoopBlock:
+		return v.Next
+	case *ForEachBlock:
+		return v.Next
+	}
+	return nil
+}
+
+// ── Step execution ──────────────────────────────────────────────────────────
+
+// executeWorkflowStep executes a single agent or sub-workflow step.
+// Returns the resolved next target ("", "_end", or step-id) and any fatal error.
+func executeWorkflowStep(step *WorkflowStep, ctx *ExecutionContext, env *WorkflowEnvelope) (string, error) {
+	emitTrail(env, step.ID, "step_start", nil)
+
+	var result *StepResult
+
+	if step.Workflow != "" {
+		result = executeSubWorkflow(step, ctx)
+	} else {
+		result = executeAgentStepWithRetry(step.ID, step.Agent, step.Input, step.Config, step.Retry, step.Fallback, ctx)
+	}
+
+	env.Steps = append(env.Steps, *result)
+
+	if result.Status == "success" {
+		ctx.Steps[step.ID] = map[string]interface{}{"output": result.Output}
+		emitTrail(env, step.ID, "step_success", nil)
+	} else {
+		emitTrail(env, step.ID, "step_error", map[string]interface{}{"error": result.Error})
+		return "", fmt.Errorf("step %s failed: %s", step.ID, result.Error)
+	}
+
+	return resolveNextTarget(step.Next, result.Output), nil
+}
+
+// executeSubWorkflow invokes a sub-workflow via Orchestrate.
+func executeSubWorkflow(step *WorkflowStep, ctx *ExecutionContext) *StepResult {
 	resolvedInput := ResolveInputs(step.Input, ctx)
 
-	// Merge step config overrides
-	if step.Config != nil {
-		for k, v := range step.Config {
+	start := time.Now()
+	subEnvelope, err := Orchestrate(step.Workflow, resolvedInput)
+	latency := float64(time.Since(start).Milliseconds())
+
+	if err != nil {
+		sr := &StepResult{
+			ID:       step.ID,
+			Workflow: step.Workflow,
+			Status:   "error",
+			Metrics:  StepMetrics{LatencyMs: latency},
+			Error:    err.Error(),
+		}
+		// Attach partial envelope if available
+		if wfErr, ok := err.(*WorkflowError); ok && wfErr.Envelope != nil {
+			sr.SubEnvelope = wfErr.Envelope
+		}
+		return sr
+	}
+
+	return &StepResult{
+		ID:          step.ID,
+		Workflow:    step.Workflow,
+		Status:      "success",
+		Output:      subEnvelope.Result,
+		SubEnvelope: subEnvelope,
+		Metrics: StepMetrics{
+			LatencyMs:    latency,
+			InputTokens:  toInt(subEnvelope.Metrics["total_input_tokens"]),
+			OutputTokens: toInt(subEnvelope.Metrics["total_output_tokens"]),
+		},
+	}
+}
+
+// executeAgentStepWithRetry runs an agent with retry + fallback logic.
+func executeAgentStepWithRetry(stepID, agentID string, inputBindings, config map[string]interface{}, retry *RetryConfig, fallback *FallbackConfig, ctx *ExecutionContext) *StepResult {
+	resolvedInput := ResolveInputs(inputBindings, ctx)
+
+	// Apply config overrides
+	if config != nil {
+		for k, v := range config {
 			resolvedInput["__config_"+k] = v
 		}
 	}
 
 	maxAttempts := 1
 	backoffMs := 0
-	if step.Retry != nil {
-		maxAttempts = step.Retry.MaxAttempts
+	if retry != nil {
+		maxAttempts = retry.MaxAttempts
 		if maxAttempts < 1 {
 			maxAttempts = 1
 		}
-		backoffMs = step.Retry.BackoffMs
+		backoffMs = retry.BackoffMs
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		orchLog.Debug("executing step", map[string]interface{}{
-			"step":    step.ID,
-			"agent":   step.Agent,
+			"step":    stepID,
+			"agent":   agentID,
 			"attempt": attempt,
 		})
 
 		start := time.Now()
-		agentResult, err := InvokeAgent(step.Agent, resolvedInput)
+		agentResult, err := InvokeAgent(agentID, resolvedInput)
 		latency := float64(time.Since(start).Milliseconds())
 
 		if err == nil {
 			return &StepResult{
-				ID:     step.ID,
-				Agent:  step.Agent,
+				ID:     stepID,
+				Agent:  agentID,
 				Status: "success",
 				Output: agentResult.Output,
 				Metrics: StepMetrics{
@@ -197,7 +286,7 @@ func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult
 
 		lastErr = err
 		orchLog.Warn("step attempt failed", map[string]interface{}{
-			"step":    step.ID,
+			"step":    stepID,
 			"attempt": attempt,
 			"error":   err.Error(),
 		})
@@ -208,29 +297,30 @@ func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult
 	}
 
 	// All retries exhausted — try fallback
-	if step.Fallback != nil {
+	if fallback != nil && fallback.Agent != "" {
 		orchLog.Info("trying fallback agent", map[string]interface{}{
-			"step":     step.ID,
-			"fallback": step.Fallback.Agent,
+			"step":     stepID,
+			"fallback": fallback.Agent,
 		})
 
-		// Merge fallback config
 		fallbackInput := make(map[string]interface{})
 		for k, v := range resolvedInput {
 			fallbackInput[k] = v
 		}
-		for k, v := range step.Fallback.Config {
-			fallbackInput[k] = v
+		if fallback.Config != nil {
+			for k, v := range fallback.Config {
+				fallbackInput["__config_"+k] = v
+			}
 		}
 
 		start := time.Now()
-		agentResult, err := InvokeAgent(step.Fallback.Agent, fallbackInput)
+		agentResult, err := InvokeAgent(fallback.Agent, fallbackInput)
 		latency := float64(time.Since(start).Milliseconds())
 
 		if err == nil {
 			return &StepResult{
-				ID:    step.ID,
-				Agent: step.Fallback.Agent,
+				ID:     stepID,
+				Agent:  fallback.Agent,
 				Status: "success",
 				Output: agentResult.Output,
 				Metrics: StepMetrics{
@@ -238,16 +328,17 @@ func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult
 					InputTokens:  agentResult.Metrics.InputTokens,
 					OutputTokens: agentResult.Metrics.OutputTokens,
 				},
-				Attempts:     maxAttempts,
-				UsedFallback: true,
+				Attempts:       maxAttempts,
+				UsedFallback:   true,
+				FallbackReason: lastErr.Error(),
 			}
 		}
 		lastErr = err
 	}
 
 	return &StepResult{
-		ID:       step.ID,
-		Agent:    step.Agent,
+		ID:       stepID,
+		Agent:    agentID,
 		Status:   "error",
 		Metrics:  StepMetrics{},
 		Attempts: maxAttempts,
@@ -255,27 +346,305 @@ func executeStepWithRetry(step *WorkflowStep, ctx *ExecutionContext) *StepResult
 	}
 }
 
-func executeParallelSteps(group *ParallelGroup, ctx *ExecutionContext) []*StepResult {
-	results := make([]*StepResult, len(group.Parallel))
+// ── Parallel execution ──────────────────────────────────────────────────────
+
+func executeParallelBlock(pb *ParallelBlock, ctx *ExecutionContext, env *WorkflowEnvelope) (string, error) {
+	emitTrail(env, pb.ID, "parallel_start", map[string]interface{}{"join": pb.Join, "branches": len(pb.Branches)})
+
+	results := make([]*StepResult, len(pb.Branches))
 	var wg sync.WaitGroup
 
-	for i, step := range group.Parallel {
+	for i, branch := range pb.Branches {
 		wg.Add(1)
-		go func(idx int, s WorkflowStep) {
+		go func(idx int, b ParallelBranch) {
 			defer wg.Done()
-			results[idx] = executeStepWithRetry(&s, ctx)
-		}(i, step)
+			if b.Workflow != "" {
+				ws := &WorkflowStep{
+					ID:       b.ID,
+					Workflow: b.Workflow,
+					Input:    b.Input,
+					Config:   b.Config,
+				}
+				results[idx] = executeSubWorkflow(ws, ctx)
+			} else {
+				results[idx] = executeAgentStepWithRetry(b.ID, b.Agent, b.Input, b.Config, b.Retry, b.Fallback, ctx)
+			}
+		}(i, branch)
 	}
 
 	wg.Wait()
-	return results
+
+	// Process results based on join strategy
+	hasError := false
+	for i, result := range results {
+		env.Steps = append(env.Steps, *result)
+		branchID := pb.Branches[i].ID
+		if result.Status == "success" {
+			ctx.Steps[branchID] = map[string]interface{}{"output": result.Output}
+		} else {
+			hasError = true
+		}
+	}
+
+	emitTrail(env, pb.ID, "parallel_end", nil)
+
+	switch pb.Join {
+	case "all":
+		if hasError {
+			return "", fmt.Errorf("parallel block %s: one or more branches failed (join=all)", pb.ID)
+		}
+	case "any":
+		// At least one must succeed
+		anySuccess := false
+		for _, r := range results {
+			if r.Status == "success" {
+				anySuccess = true
+				break
+			}
+		}
+		if !anySuccess {
+			return "", fmt.Errorf("parallel block %s: all branches failed (join=any)", pb.ID)
+		}
+	case "all_settled":
+		// Always continue, but mark partial_failure on envelope if any errors
+		if hasError {
+			if env.Status == "success" {
+				env.Status = "partial_failure"
+			}
+		}
+	}
+
+	return resolveNextTarget(pb.Next, nil), nil
 }
 
-// evaluateCondition handles simple short-circuit conditions.
+// ── Loop execution ──────────────────────────────────────────────────────────
+
+func executeLoopBlock(lb *LoopBlock, ctx *ExecutionContext, env *WorkflowEnvelope) (string, error) {
+	for iteration := 1; iteration <= lb.MaxIterations; iteration++ {
+		emitTrail(env, lb.ID, "loop_iteration", map[string]interface{}{"iteration": iteration})
+
+		var result *StepResult
+		if lb.Workflow != "" {
+			ws := &WorkflowStep{
+				ID:       lb.ID,
+				Workflow: lb.Workflow,
+				Input:    lb.Input,
+				Config:   lb.Config,
+			}
+			result = executeSubWorkflow(ws, ctx)
+		} else {
+			result = executeAgentStepWithRetry(lb.ID, lb.Agent, lb.Input, lb.Config, lb.Retry, lb.Fallback, ctx)
+		}
+
+		// Update context with latest iteration output
+		if result.Status == "success" {
+			ctx.Steps[lb.ID] = map[string]interface{}{"output": result.Output}
+		} else {
+			env.Steps = append(env.Steps, *result)
+			return "", fmt.Errorf("loop %s iteration %d failed: %s", lb.ID, iteration, result.Error)
+		}
+
+		// Only add the final iteration to steps (or all if you want full trail)
+		// We'll add the last one after the loop; for now, overwrite
+		if iteration == lb.MaxIterations {
+			env.Steps = append(env.Steps, *result)
+		}
+
+		// Check exit condition
+		if lb.Until != "" && evaluateCondition(lb.Until, result.Output) {
+			env.Steps = append(env.Steps, *result)
+			break
+		}
+	}
+
+	return resolveNextTarget(lb.Next, nil), nil
+}
+
+// ── ForEach execution ───────────────────────────────────────────────────────
+
+func executeForEachBlock(feb *ForEachBlock, ctx *ExecutionContext, env *WorkflowEnvelope) (string, error) {
+	// Resolve the collection binding to get the array
+	collectionRaw := ResolveRef(feb.Collection, ctx)
+	items, ok := toSlice(collectionRaw)
+	if !ok {
+		return "", fmt.Errorf("for_each %s: collection %q did not resolve to an array", feb.ID, feb.Collection)
+	}
+
+	if len(items) == 0 {
+		ctx.Steps[feb.ID] = map[string]interface{}{"output": []interface{}{}}
+		env.Steps = append(env.Steps, StepResult{
+			ID:     feb.ID,
+			Agent:  feb.Agent,
+			Status: "success",
+			Output: []interface{}{},
+		})
+		return resolveNextTarget(feb.Next, nil), nil
+	}
+
+	concurrency := feb.MaxConcurrency
+	if concurrency <= 0 {
+		concurrency = len(items)
+	}
+
+	results := make([]interface{}, len(items))
+	errors := make([]error, len(items))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for i, item := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, currentItem interface{}) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			emitTrail(env, feb.ID, "for_each_iteration", map[string]interface{}{"index": idx})
+
+			// Build per-iteration input: resolve bindings, inject $.current
+			iterCtx := &ExecutionContext{
+				Input: ctx.Input,
+				Steps: make(map[string]map[string]interface{}),
+			}
+			// Copy existing step outputs
+			for k, v := range ctx.Steps {
+				iterCtx.Steps[k] = v
+			}
+			// Inject $.current as a pseudo-step
+			iterCtx.Steps["__current"] = map[string]interface{}{"output": currentItem}
+
+			iterInput := ResolveInputs(feb.Input, iterCtx)
+
+			// Replace any $.current references in resolved input
+			for k, v := range iterInput {
+				if s, ok := v.(string); ok && s == "$.current" {
+					iterInput[k] = currentItem
+				}
+			}
+
+			stepResult := executeAgentStepWithRetry(
+				fmt.Sprintf("%s[%d]", feb.ID, idx),
+				feb.Agent, feb.Input, feb.Config,
+				feb.Retry, feb.Fallback, iterCtx,
+			)
+
+			if stepResult.Status == "success" {
+				results[idx] = stepResult.Output
+			} else {
+				errors[idx] = fmt.Errorf("iteration %d: %s", idx, stepResult.Error)
+			}
+		}(i, item)
+	}
+
+	wg.Wait()
+
+	// Check for errors
+	var firstErr error
+	for _, e := range errors {
+		if e != nil {
+			firstErr = e
+			break
+		}
+	}
+
+	// Aggregate-only trail entry
+	env.Steps = append(env.Steps, StepResult{
+		ID:     feb.ID,
+		Agent:  feb.Agent,
+		Status: statusForForEach(errors),
+		Output: results,
+	})
+
+	ctx.Steps[feb.ID] = map[string]interface{}{"output": results}
+
+	if firstErr != nil && statusForForEach(errors) == "error" {
+		return "", fmt.Errorf("for_each %s: %w", feb.ID, firstErr)
+	}
+
+	return resolveNextTarget(feb.Next, nil), nil
+}
+
+func statusForForEach(errors []error) string {
+	hasError := false
+	hasSuccess := false
+	for _, e := range errors {
+		if e != nil {
+			hasError = true
+		} else {
+			hasSuccess = true
+		}
+	}
+	if hasError && hasSuccess {
+		return "partial_failure"
+	}
+	if hasError {
+		return "error"
+	}
+	return "success"
+}
+
+// ── Next resolution ─────────────────────────────────────────────────────────
+
+// resolveNextTarget evaluates the NextField and returns the target step ID.
+// Returns "" for fall-through, "_end" to stop, or a step ID to jump to.
+func resolveNextTarget(next *NextField, output interface{}) string {
+	if next == nil {
+		return "" // fall-through
+	}
+
+	if next.Target != "" {
+		return next.Target
+	}
+
+	if next.Switch != nil {
+		return resolveSwitchTarget(next.Switch, output)
+	}
+
+	if next.If != nil {
+		return resolveIfTarget(next.If, output)
+	}
+
+	return ""
+}
+
+func resolveSwitchTarget(sn *SwitchNext, output interface{}) string {
+	outputMap := toMap(output)
+	if outputMap == nil {
+		return sn.Default
+	}
+
+	val := resolveFieldPath(sn.Expression, outputMap)
+	if val == nil {
+		return sn.Default
+	}
+
+	valStr := fmt.Sprintf("%v", val)
+	if target, ok := sn.Cases[valStr]; ok {
+		return target
+	}
+
+	return sn.Default
+}
+
+func resolveIfTarget(in *IfNext, output interface{}) string {
+	outputMap := toMap(output)
+	if outputMap == nil {
+		return in.Else
+	}
+
+	if evaluateCondition(in.Condition, output) {
+		return in.Then
+	}
+	return in.Else
+}
+
+// ── Condition evaluation ────────────────────────────────────────────────────
+
+// evaluateCondition handles conditions used in if:, until:, and switch:.
 // Supported patterns:
-//   - "!output.field"       -> true when output[field] is falsy
-//   - "output.field"        -> true when output[field] is truthy
-//   - "output.field == val" -> equality check
+//   - "output.field"        -> truthy check
+//   - "!output.field"       -> falsy check
+//   - "output.field == val" -> equality
+//   - "output.field > val"  -> numeric comparison
 func evaluateCondition(condition string, output interface{}) bool {
 	outputMap := toMap(output)
 	if outputMap == nil {
@@ -284,19 +653,31 @@ func evaluateCondition(condition string, output interface{}) bool {
 
 	condition = strings.TrimSpace(condition)
 
-	// Handle negation: !output.field
 	if strings.HasPrefix(condition, "!") {
 		inner := strings.TrimSpace(condition[1:])
 		return !evaluatePositiveCondition(inner, outputMap)
 	}
 
-	// Handle equality: output.field == value
 	if idx := strings.Index(condition, "=="); idx != -1 {
 		left := strings.TrimSpace(condition[:idx])
 		right := strings.TrimSpace(condition[idx+2:])
 		right = strings.Trim(right, "\"'")
 		val := resolveFieldPath(left, outputMap)
 		return fmt.Sprintf("%v", val) == right
+	}
+
+	if idx := strings.Index(condition, ">"); idx != -1 && !strings.Contains(condition, ">=") {
+		left := strings.TrimSpace(condition[:idx])
+		right := strings.TrimSpace(condition[idx+1:])
+		leftVal := resolveFieldPath(left, outputMap)
+		return toFloat(leftVal) > toFloat(right)
+	}
+
+	if idx := strings.Index(condition, ">="); idx != -1 {
+		left := strings.TrimSpace(condition[:idx])
+		right := strings.TrimSpace(condition[idx+2:])
+		leftVal := resolveFieldPath(left, outputMap)
+		return toFloat(leftVal) >= toFloat(right)
 	}
 
 	return evaluatePositiveCondition(condition, outputMap)
@@ -308,7 +689,6 @@ func evaluatePositiveCondition(expr string, outputMap map[string]interface{}) bo
 }
 
 func resolveFieldPath(path string, outputMap map[string]interface{}) interface{} {
-	// Strip "output." prefix if present
 	path = strings.TrimPrefix(path, "output.")
 	parts := strings.Split(path, ".")
 	return traverseMap(outputMap, parts)
@@ -332,431 +712,99 @@ func isTruthy(val interface{}) bool {
 	}
 }
 
-func buildSkippedResult(stepID, agent string, defaults map[string]interface{}) StepResult {
-	var output interface{}
-	if defaults != nil {
-		if val, ok := defaults[stepID]; ok {
-			output = val
-		}
-	}
-	return StepResult{
-		ID:     stepID,
-		Agent:  agent,
-		Status: "skipped",
-		Output: output,
-	}
-}
+// ── Trail & helpers ─────────────────────────────────────────────────────────
 
-func populateCtxFromDefaults(ctx *ExecutionContext, stepID string, defaults map[string]interface{}) {
-	if defaults == nil {
-		return
-	}
-	if val, ok := defaults[stepID]; ok {
-		ctx.Steps[stepID] = map[string]interface{}{"output": val}
-	}
-}
-
-// ── Route execution engine ──
-
-// executeRoute executes a RouteBlock in three phases:
-// Phase 1: routing-agent decision with retry + fallback
-// Phase 2: handle _none (short-circuit)
-// Phase 3: dispatch target (no retry)
-func executeRoute(rb *RouteBlock, ctx *ExecutionContext) *StepResult {
-	maxAttempts := 1
-	backoffMs := 0
-	if rb.Retry != nil {
-		maxAttempts = rb.Retry.MaxAttempts
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
-		backoffMs = rb.Retry.BackoffMs
-	}
-
-	orchLog.Info("route starting", map[string]interface{}{
-		"id":             rb.ID,
-		"routing_agent":  rb.RoutingAgent,
-		"route_keys":     routeKeys(rb),
-		"max_attempts":   maxAttempts,
-		"has_fallback":   rb.Fallback != nil,
+func emitTrail(env *WorkflowEnvelope, stepID, event string, data interface{}) {
+	env.Trail = append(env.Trail, TrailEntry{
+		StepID:    stepID,
+		Event:     event,
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Data:      data,
 	})
+}
 
-	routingAgentDef, err := LoadRoutingAgent(rb.RoutingAgent)
-	if err != nil {
-		return &StepResult{
-			ID:     rb.ID,
-			Agent:  "routing-agent:" + rb.RoutingAgent,
-			Status: "error",
-			Error:  err.Error(),
-		}
-	}
-
-	resolvedInput := ResolveInputs(rb.Input, ctx)
-	keys := routeKeys(rb)
-
-	// ── Phase 1: Decision with retry + fallback ──
-
-	var chosenKey string
-	var routingAgentOutput map[string]interface{}
-	usedFallback := false
-	totalAttempts := 0
-	decided := false
-	var lastErr error
-
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		totalAttempts = attempt
-		orchLog.Debug("route decision attempt", map[string]interface{}{
-			"id":      rb.ID,
-			"attempt": attempt,
+func markNotExecuted(rawStep interface{}, env *WorkflowEnvelope) {
+	switch s := rawStep.(type) {
+	case *WorkflowStep:
+		env.Steps = append(env.Steps, StepResult{
+			ID:     s.ID,
+			Agent:  s.Agent,
+			Status: "not_executed",
 		})
+	case *ParallelBlock:
+		for _, b := range s.Branches {
+			env.Steps = append(env.Steps, StepResult{
+				ID:     b.ID,
+				Agent:  b.Agent,
+				Status: "not_executed",
+			})
+		}
+	case *LoopBlock:
+		env.Steps = append(env.Steps, StepResult{
+			ID:     s.ID,
+			Agent:  s.Agent,
+			Status: "not_executed",
+		})
+	case *ForEachBlock:
+		env.Steps = append(env.Steps, StepResult{
+			ID:     s.ID,
+			Agent:  s.Agent,
+			Status: "not_executed",
+		})
+	}
+}
 
-		output, err := executeRoutingAgentDecision(routingAgentDef, resolvedInput, keys)
-		if err == nil {
-			key, _ := output["route"].(string)
-			if key != "_none" {
-				if _, exists := rb.Routes[key]; !exists {
-					err = fmt.Errorf("routing-agent %q returned invalid route key %q; valid: %v", rb.RoutingAgent, key, append(keys, "_none"))
+func finalizeEnvelope(env *WorkflowEnvelope, startTime time.Time) {
+	endTime := time.Now().UTC()
+	env.Timestamps["completed_at"] = endTime.Format(time.RFC3339)
+	env.Metrics["total_latency_ms"] = float64(endTime.Sub(startTime).Milliseconds())
+
+	var totalInput, totalOutput int
+	for _, sr := range env.Steps {
+		totalInput += sr.Metrics.InputTokens
+		totalOutput += sr.Metrics.OutputTokens
+	}
+	env.Metrics["total_input_tokens"] = totalInput
+	env.Metrics["total_output_tokens"] = totalOutput
+
+	// Check for step errors if status is still success
+	if env.Status == "success" {
+		for _, sr := range env.Steps {
+			if sr.Status == "error" {
+				env.Status = "error"
+				if env.Error == "" {
+					env.Error = fmt.Sprintf("step %s failed: %s", sr.ID, sr.Error)
 				}
-			}
-			if err == nil {
-				chosenKey = key
-				routingAgentOutput = output
-				decided = true
-				orchLog.Info("route decision made", map[string]interface{}{
-					"id":    rb.ID,
-					"route": chosenKey,
-				})
 				break
 			}
 		}
-
-		lastErr = err
-		orchLog.Warn("route decision attempt failed", map[string]interface{}{
-			"id":      rb.ID,
-			"attempt": attempt,
-			"error":   err.Error(),
-		})
-
-		if attempt < maxAttempts && backoffMs > 0 {
-			time.Sleep(time.Duration(backoffMs*attempt) * time.Millisecond)
-		}
-	}
-
-	// Fallback decision
-	if !decided && rb.Fallback != nil {
-		orchLog.Info("trying fallback routing-agent", map[string]interface{}{
-			"id":                      rb.ID,
-			"fallback_routing_agent":  rb.Fallback.RoutingAgent,
-		})
-
-		fallbackDef, ferr := LoadRoutingAgent(rb.Fallback.RoutingAgent)
-		if ferr == nil {
-			// Merge fallback config overrides into a copy
-			mergedDef := *fallbackDef
-			if rb.Fallback.Config != nil {
-				for k, v := range rb.Fallback.Config {
-					switch k {
-					case "model":
-						if s, ok := v.(string); ok {
-							mergedDef.Model = s
-						}
-					case "temperature":
-						if f, ok := v.(float64); ok {
-							mergedDef.Temperature = f
-						}
-					}
-				}
-			}
-
-			output, ferr2 := executeRoutingAgentDecision(&mergedDef, resolvedInput, keys)
-			if ferr2 == nil {
-				key, _ := output["route"].(string)
-				if key != "_none" {
-					if _, exists := rb.Routes[key]; !exists {
-						ferr2 = fmt.Errorf("fallback routing-agent returned invalid key %q", key)
-					}
-				}
-				if ferr2 == nil {
-					chosenKey = key
-					routingAgentOutput = output
-					usedFallback = true
-					totalAttempts = maxAttempts + 1
-					decided = true
-				} else {
-					lastErr = ferr2
-				}
-			} else {
-				lastErr = ferr2
-			}
-		} else {
-			lastErr = ferr
-		}
-
-		if !decided {
-			totalAttempts = maxAttempts + 1
-		}
-	}
-
-	if !decided {
-		errMsg := "all decision attempts exhausted"
-		if lastErr != nil {
-			errMsg = lastErr.Error()
-		}
-		orchLog.Warn("route failed", map[string]interface{}{"id": rb.ID, "error": errMsg})
-		return &StepResult{
-			ID:           rb.ID,
-			Agent:        "routing-agent:" + rb.RoutingAgent,
-			Status:       "error",
-			Metrics:      StepMetrics{},
-			Attempts:     totalAttempts,
-			UsedFallback: rb.Fallback != nil,
-			Error:        errMsg,
-		}
-	}
-
-	resolvedAgent := "routing-agent:" + rb.RoutingAgent
-	if usedFallback {
-		resolvedAgent = "routing-agent:" + rb.Fallback.RoutingAgent
-	}
-
-	// ── Phase 2: Handle _none → short_circuited ──
-
-	target := rb.Routes[chosenKey]
-	isNone := chosenKey == "_none"
-	if !isNone {
-		if targetMap, ok := target.(map[string]interface{}); ok {
-			if sc, _ := targetMap["short_circuit"].(bool); sc {
-				isNone = true
-			}
-		}
-	}
-
-	if isNone {
-		output := &RouteOutput{
-			Route:        "_none",
-			RouterOutput: routingAgentOutput,
-			Result:       nil,
-		}
-		return &StepResult{
-			ID:           rb.ID,
-			Agent:        resolvedAgent,
-			Status:       "short_circuited",
-			Output:       output,
-			Metrics:      StepMetrics{},
-			Attempts:     totalAttempts,
-			UsedFallback: usedFallback,
-		}
-	}
-
-	// ── Phase 3: Dispatch target (no retry) ──
-
-	agentResult, err := dispatchRouteTarget(target, resolvedInput, rb, ctx)
-	if err != nil {
-		return &StepResult{
-			ID:           rb.ID,
-			Agent:        resolvedAgent,
-			Status:       "error",
-			Metrics:      StepMetrics{},
-			Attempts:     totalAttempts,
-			UsedFallback: usedFallback,
-			Error:        err.Error(),
-		}
-	}
-
-	output := &RouteOutput{
-		Route:        chosenKey,
-		RouterOutput: routingAgentOutput,
-		Result:       agentResult.Output,
-	}
-
-	return &StepResult{
-		ID:           rb.ID,
-		Agent:        resolvedAgent,
-		Status:       "success",
-		Output:       output,
-		Metrics:      agentResult.Metrics,
-		Attempts:     totalAttempts,
-		UsedFallback: usedFallback,
 	}
 }
 
-// executeRoutingAgentDecision invokes the routing agent (deterministic or LLM) and returns
-// a map containing at least {"route": "<key>"}.
-func executeRoutingAgentDecision(routingAgentDef *RoutingAgentDefinition, input map[string]interface{}, keys []string) (map[string]interface{}, error) {
-	if routingAgentDef.Strategy == "deterministic" {
-		agentCompat := &AgentDefinition{
-			Name:        routingAgentDef.Name,
-			Description: routingAgentDef.Description,
-			Type:        "deterministic",
-			Handler:     routingAgentDef.Handler,
-		}
-		result, err := ExecuteAgent(input, agentCompat)
-		if err != nil {
-			return nil, err
-		}
-		if m, ok := result.Output.(map[string]interface{}); ok {
-			return m, nil
-		}
-		return nil, fmt.Errorf("deterministic routing-agent returned non-map output")
+func toSlice(v interface{}) ([]interface{}, bool) {
+	if v == nil {
+		return nil, false
 	}
-
-	// LLM strategy
-	inputParts := make([]string, 0, len(input))
-	for k, v := range input {
-		if s, ok := v.(string); ok {
-			inputParts = append(inputParts, k+": "+s)
-		} else {
-			inputParts = append(inputParts, fmt.Sprintf("%s: %v", k, v))
-		}
+	if s, ok := v.([]interface{}); ok {
+		return s, true
 	}
-	inputSummary := strings.Join(inputParts, "\n")
-
-	userMessage := inputSummary + "\n\n" +
-		"You must choose exactly one of the following routes: " + strings.Join(keys, ", ") + "\n" +
-		"If none of the routes apply, choose: _none\n" +
-		`Respond with a JSON object: { "route": "<chosen_key>" }`
-
-	result, err := CallLLM(LLMCallOptions{
-		Model:        routingAgentDef.Model,
-		SystemPrompt: routingAgentDef.Prompt,
-		UserContent:  userMessage,
-		Temperature:  routingAgentDef.Temperature,
-		SchemaName:   "",
-		BaseURL:      routingAgentDef.BaseURL,
-		APIKeyEnv:    routingAgentDef.APIKeyEnv,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if m, ok := result.Output.(map[string]interface{}); ok {
-		return m, nil
-	}
-	return nil, fmt.Errorf("LLM routing-agent returned non-map output")
+	return nil, false
 }
 
-// dispatchRouteTarget dispatches to the chosen route target:
-//   - string        → agent ID with pass-through input
-//   - map["route"]  → nested RouteBlock (recursive)
-//   - map["agent"]  → agent with explicit or pass-through input
-//   - map["workflow"] → call Orchestrate
-func dispatchRouteTarget(target interface{}, passThrough map[string]interface{}, rb *RouteBlock, ctx *ExecutionContext) (*AgentResult, error) {
-	// String → agent ID
-	if agentID, ok := target.(string); ok {
-		return InvokeAgent(agentID, passThrough)
+func toFloat(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case string:
+		var f float64
+		fmt.Sscanf(n, "%f", &f)
+		return f
 	}
-
-	targetMap, ok := target.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("unknown route target type in route %s: %T", rb.ID, target)
-	}
-
-	// Nested route block
-	if nestedRaw, ok := targetMap["route"]; ok {
-		// Re-marshal and decode into RouteBlock
-		nestedRB, err := decodeRouteBlock(nestedRaw)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode nested route block: %w", err)
-		}
-		nestedResult := executeRoute(nestedRB, ctx)
-		return &AgentResult{
-			Output:  nestedResult.Output,
-			Metrics: nestedResult.Metrics,
-		}, nil
-	}
-
-	// Agent with explicit input
-	if agentID, ok := targetMap["agent"].(string); ok {
-		var agentInput map[string]interface{}
-		if inputRaw, hasInput := targetMap["input"]; hasInput {
-			if inputMap, ok := inputRaw.(map[string]interface{}); ok {
-				agentInput = ResolveInputs(inputMap, ctx)
-			}
-		}
-		if agentInput == nil {
-			agentInput = passThrough
-		}
-		return InvokeAgent(agentID, agentInput)
-	}
-
-	// Workflow target
-	if wfName, ok := targetMap["workflow"].(string); ok {
-		var wfInput map[string]interface{}
-		if inputRaw, hasInput := targetMap["input"]; hasInput {
-			if inputMap, ok := inputRaw.(map[string]interface{}); ok {
-				wfInput = ResolveInputs(inputMap, ctx)
-			}
-		}
-		if wfInput == nil {
-			wfInput = passThrough
-		}
-		envelope, err := Orchestrate(wfName, wfInput)
-		if err != nil {
-			return nil, err
-		}
-		latency, _ := envelope.Metrics["total_latency_ms"].(float64)
-		return &AgentResult{
-			Output: envelope.Result,
-			Metrics: StepMetrics{
-				LatencyMs:    latency,
-				InputTokens:  toInt(envelope.Metrics["total_input_tokens"]),
-				OutputTokens: toInt(envelope.Metrics["total_output_tokens"]),
-			},
-		}, nil
-	}
-
-	return nil, fmt.Errorf("unknown route target type in route %s: %v", rb.ID, targetMap)
+	return 0
 }
 
-// routeKeys returns the valid (non-_none) keys from a RouteBlock's routes map.
-func routeKeys(rb *RouteBlock) []string {
-	keys := make([]string, 0, len(rb.Routes))
-	for k := range rb.Routes {
-		if k != "_none" {
-			keys = append(keys, k)
-		}
-	}
-	return keys
-}
-
-// decodeRouteBlock converts a raw interface{} (from YAML map) into a *RouteBlock.
-func decodeRouteBlock(raw interface{}) (*RouteBlock, error) {
-	m, ok := raw.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("route block is not a map")
-	}
-	rb := &RouteBlock{}
-	if id, ok := m["id"].(string); ok {
-		rb.ID = id
-	}
-	if ra, ok := m["routing_agent"].(string); ok {
-		rb.RoutingAgent = ra
-	}
-	if input, ok := m["input"].(map[string]interface{}); ok {
-		rb.Input = input
-	}
-	if routes, ok := m["routes"].(map[string]interface{}); ok {
-		rb.Routes = routes
-	}
-	if retryRaw, ok := m["retry"].(map[string]interface{}); ok {
-		rb.Retry = &RetryConfig{
-			MaxAttempts: toInt(retryRaw["max_attempts"]),
-			BackoffMs:   toInt(retryRaw["backoff_ms"]),
-		}
-	}
-	if fallbackRaw, ok := m["fallback"].(map[string]interface{}); ok {
-		rb.Fallback = &RoutingAgentFallbackConfig{}
-		if ra, ok := fallbackRaw["routing_agent"].(string); ok {
-			rb.Fallback.RoutingAgent = ra
-		}
-		if cfg, ok := fallbackRaw["config"].(map[string]interface{}); ok {
-			rb.Fallback.Config = cfg
-		}
-	}
-	return rb, nil
-}
-
-// toInt safely converts interface{} to int.
 func toInt(v interface{}) int {
 	switch n := v.(type) {
 	case int:
@@ -776,7 +824,6 @@ func generateRequestID() string {
 func newUUID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
-	// Set version 4 bits
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",

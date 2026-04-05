@@ -4,22 +4,14 @@ require "securerandom"
 require "concurrent"
 
 module AgenticEngine
-  # Full workflow orchestration engine.
-  #
-  # Walks the step list in order, executes serial steps sequentially and
-  # parallel groups concurrently (via Concurrent::Promises), handles retry,
-  # fallback, and short-circuit logic.
   module Orchestrator
     class OrchestrationError < StandardError; end
+
+    ZERO_METRICS = StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0).freeze
 
     @log = Logger.create("orchestrator")
 
     class << self
-      # Orchestrate a complete workflow.
-      #
-      # @param workflow_name [String] matches workflows/<name>.yaml
-      # @param input [Hash] workflow-level input parameters
-      # @return [Hash] WorkflowEnvelope as a plain Hash (JSON-serializable)
       def orchestrate(workflow_name, input)
         started_at = Time.now.utc.iso8601
         request_id = SecureRandom.uuid
@@ -29,99 +21,74 @@ module AgenticEngine
 
         context = { "input" => stringify_keys(input), "steps" => {} }
         step_results = []
-        short_circuited = false
-        short_circuit_defaults = nil
-        total_metrics = { total_latency_ms: 0, total_input_tokens: 0, total_output_tokens: 0,
-                          steps_executed: 0, steps_skipped: 0 }
+        trail = []
+        status = "success"
+        error_msg = nil
 
-        workflow_def.steps.each do |entry|
-          if short_circuited
-            if entry.is_a?(RouteEntry)
-              fill_route_skipped(entry.route, short_circuit_defaults, context, step_results)
-              total_metrics[:steps_skipped] += 1
-            elsif entry.is_a?(ParallelGroup)
-              entry.parallel.each do |step|
-                default_output = short_circuit_defaults&.dig(step.id) || {}
-                result = StepResult.new(
-                  id: step.id, agent: step.agent, status: "skipped",
-                  output: default_output,
-                  metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
-                )
-                step_results << result
-                context["steps"][step.id] = { "output" => default_output }
-                total_metrics[:steps_skipped] += 1
-              end
-            else
-              default_output = short_circuit_defaults&.dig(entry.id) || {}
-              result = StepResult.new(
-                id: entry.id, agent: entry.agent, status: "skipped",
-                output: default_output,
-                metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
-              )
-              step_results << result
-              context["steps"][entry.id] = { "output" => default_output }
-              total_metrics[:steps_skipped] += 1
-            end
-            next
-          end
-
-          if entry.is_a?(ParallelGroup)
-            results = execute_parallel_group(entry.parallel, context)
-            results.each do |result|
-              step_results << result
-              context["steps"][result.id] = { "output" => result.output }
-              accumulate_metrics!(total_metrics, result)
-
-              # Check short-circuit on each parallel result
-              step_def = entry.parallel.find { |s| s.id == result.id }
-              if step_def&.short_circuit && result.status == "success"
-                if evaluate_short_circuit(step_def.short_circuit[:condition], result.output)
-                  short_circuited = true
-                  short_circuit_defaults = step_def.short_circuit[:defaults]
-                  @log.info("short_circuit:triggered", { step: result.id })
-                end
-              end
-            end
-          elsif entry.is_a?(RouteEntry)
-            route_result = execute_route(entry.route, context)
-            context["steps"][entry.route.id] = { "output" => route_result.output }
-            step_results << route_result
-            accumulate_metrics!(total_metrics, route_result)
-
-            if route_result.status == "short_circuited"
-              short_circuited = true
-              none_target = entry.route.routes["_none"]
-              short_circuit_defaults = none_target.is_a?(Hash) ? (none_target["defaults"] || {}) : {}
-              @log.info("short_circuit:triggered", { route: entry.route.id })
-            end
-          else
-            result = execute_step_with_retry(entry, context)
-            step_results << result
-            context["steps"][entry.id] = { "output" => result.output }
-            accumulate_metrics!(total_metrics, result)
-
-            # Check short-circuit
-            if entry.short_circuit && result.status == "success"
-              if evaluate_short_circuit(entry.short_circuit[:condition], result.output)
-                short_circuited = true
-                short_circuit_defaults = entry.short_circuit[:defaults]
-                @log.info("short_circuit:triggered", { step: entry.id })
-              end
-            end
+        # Build step index for graph traversal
+        step_index = {}
+        workflow_def.steps.each_with_index do |entry, i|
+          sid = get_step_id(entry)
+          step_index[sid] = i if sid
+          # Also index parallel branch IDs
+          if entry.is_a?(ParallelBlock)
+            entry.branches.each { |b| step_index[b.id] = i if b.id }
           end
         end
 
-        # Resolve final output bindings
-        final_output = Resolver.resolve_outputs(workflow_def.output, context)
-        completed_at = Time.now.utc.iso8601
+        executed_steps = Set.new
 
-        status = if short_circuited
-                   "short_circuited"
-                 elsif step_results.any? { |r| r.status == "error" }
-                   "error"
-                 else
-                   "success"
-                 end
+        begin
+          cursor = 0
+          while cursor < workflow_def.steps.length
+            entry = workflow_def.steps[cursor]
+            sid = get_step_id(entry)
+            executed_steps.add(sid)
+
+            next_target = case entry
+                          when WorkflowStep
+                            execute_workflow_step(entry, context, step_results, trail)
+                          when ParallelBlock
+                            execute_parallel_block(entry, context, step_results, trail)
+                          when LoopBlock
+                            execute_loop_block(entry, context, step_results, trail)
+                          when ForEachBlock
+                            execute_for_each_block(entry, context, step_results, trail)
+                          else
+                            ""
+                          end
+
+            if next_target == "_end"
+              break
+            elsif next_target && !next_target.empty?
+              idx = step_index[next_target]
+              raise OrchestrationError, "next target '#{next_target}' not found" unless idx
+              cursor = idx
+            else
+              cursor += 1
+            end
+          end
+        rescue StandardError => e
+          status = "error"
+          error_msg = e.message
+          @log.error("orchestrate:error", { workflow: workflow_name, error: e.message })
+        end
+
+        # Mark non-executed steps
+        workflow_def.steps.each do |entry|
+          sid = get_step_id(entry)
+          mark_not_executed(entry, step_results) unless executed_steps.include?(sid)
+        end
+
+        # Resolve outputs
+        final_output = begin
+          Resolver.resolve_outputs(workflow_def.output, context)
+        rescue StandardError
+          {}
+        end
+
+        completed_at = Time.now.utc.iso8601
+        total_metrics = compute_total_metrics(step_results)
 
         envelope = WorkflowEnvelope.new(
           workflow:   workflow_def.name,
@@ -131,400 +98,414 @@ module AgenticEngine
           timestamps: { started_at: started_at, completed_at: completed_at },
           metrics:    total_metrics,
           steps:      step_results,
+          trail:      trail,
           result:     final_output,
-          error:      step_results.select { |r| r.status == "error" }.map(&:error).compact.first
+          error:      error_msg
         )
 
-        @log.info("orchestrate:complete", { workflow: workflow_name, status: status, request_id: request_id })
+        @log.info("orchestrate:complete", { workflow: workflow_name, status: status })
+
+        if status == "error"
+          raise WorkflowError.new(error_msg || "unknown error", envelope: envelope.to_h)
+        end
 
         envelope.to_h
       end
 
       private
 
-      # Execute a group of steps in parallel using concurrent-ruby Promises.
-      #
-      # @param steps [Array<WorkflowStep>]
-      # @param context [Hash]
-      # @return [Array<StepResult>]
-      def execute_parallel_group(steps, context)
-        @log.debug("parallel_group", { step_ids: steps.map(&:id) })
+      # ── Step execution ──
 
-        # Snapshot the context so parallel steps don't see each other's writes
+      def execute_workflow_step(step, context, results, trail)
+        emit_trail(trail, step.id, "step_start")
+
+        sr = if step.workflow && !step.workflow.empty?
+               execute_sub_workflow(step, context)
+             else
+               execute_agent_step(step.id, step.agent, step.input, step.config,
+                                  step.retry_config, step.fallback, context)
+             end
+
+        results << sr
+
+        if sr.status == "success"
+          context["steps"][step.id] = { "output" => sr.output }
+          emit_trail(trail, step.id, "step_success")
+        else
+          emit_trail(trail, step.id, "step_error", { error: sr.error })
+          raise OrchestrationError, "Step '#{step.id}' failed: #{sr.error}"
+        end
+
+        resolve_next_target(step.next_field, sr.output)
+      end
+
+      def execute_sub_workflow(step, context)
+        resolved_input = Resolver.resolve_inputs(step.input, context)
+        start_time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+        begin
+          sub_envelope = orchestrate(step.workflow, resolved_input)
+          elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000).round(2)
+
+          StepResult.new(
+            id:           step.id,
+            workflow:     step.workflow,
+            status:       "success",
+            output:       sub_envelope[:result],
+            sub_envelope: sub_envelope,
+            metrics:      StepMetrics.new(
+              latency_ms:    elapsed_ms,
+              input_tokens:  sub_envelope.dig(:metrics, :total_input_tokens) || 0,
+              output_tokens: sub_envelope.dig(:metrics, :total_output_tokens) || 0
+            )
+          )
+        rescue WorkflowError => e
+          elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start_time) * 1000).round(2)
+          StepResult.new(
+            id:           step.id,
+            workflow:     step.workflow,
+            status:       "error",
+            sub_envelope: e.envelope,
+            metrics:      StepMetrics.new(latency_ms: elapsed_ms, input_tokens: 0, output_tokens: 0),
+            error:        e.message
+          )
+        end
+      end
+
+      def execute_agent_step(step_id, agent_id, input_bindings, config, retry_config, fallback, context)
+        resolved_input = Resolver.resolve_inputs(input_bindings, context)
+        config_overrides = config || {}
+
+        max_attempts = retry_config ? retry_config.max_attempts : 1
+        backoff_ms = retry_config ? retry_config.backoff_ms : 0
+        last_error = nil
+
+        max_attempts.times do |attempt_index|
+          attempt = attempt_index + 1
+          begin
+            agent_def = Loader.load_agent(agent_id)
+            result = Runner.execute_agent(resolved_input, agent_def, config_overrides: config_overrides)
+
+            return StepResult.new(
+              id:       step_id,
+              agent:    agent_id,
+              status:   "success",
+              output:   result[:output],
+              metrics:  result[:metrics],
+              attempts: attempt
+            )
+          rescue StandardError => e
+            last_error = e
+            @log.warn("step:attempt_failed", { step: step_id, attempt: attempt, error: e.message })
+            if attempt_index < max_attempts - 1
+              sleep((backoff_ms * (attempt_index + 1)) / 1000.0)
+            end
+          end
+        end
+
+        # Fallback
+        if fallback && fallback.agent && !fallback.agent.empty?
+          @log.info("step:fallback", { step: step_id, fallback_agent: fallback.agent })
+          begin
+            fallback_def = Loader.load_agent(fallback.agent)
+            fb_overrides = config_overrides.merge(fallback.config || {})
+            result = Runner.execute_agent(resolved_input, fallback_def, config_overrides: fb_overrides)
+
+            return StepResult.new(
+              id:              step_id,
+              agent:           fallback.agent,
+              status:          "success",
+              output:          result[:output],
+              metrics:         result[:metrics],
+              attempts:        max_attempts,
+              used_fallback:   true,
+              fallback_reason: last_error&.message
+            )
+          rescue StandardError => e
+            last_error = e
+          end
+        end
+
+        StepResult.new(
+          id:       step_id,
+          agent:    agent_id,
+          status:   "error",
+          output:   nil,
+          metrics:  ZERO_METRICS,
+          attempts: max_attempts,
+          error:    last_error&.message || "Unknown error"
+        )
+      end
+
+      # ── Parallel execution ──
+
+      def execute_parallel_block(pb, context, results, trail)
+        emit_trail(trail, pb.id, "parallel_start", { join: pb.join, branches: pb.branches.length })
+
         frozen_context = deep_dup(context)
 
-        futures = steps.map do |step|
+        futures = pb.branches.map do |branch|
           Concurrent::Promises.future do
-            execute_step_with_retry(step, frozen_context)
-          end
-        end
-
-        # Wait for all to complete
-        combined = Concurrent::Promises.zip(*futures).value!
-        # zip returns a single value if only one future; normalize to array
-        Array(combined)
-      end
-
-      # Execute a single step with retry and fallback logic.
-      #
-      # @param step [WorkflowStep]
-      # @param context [Hash]
-      # @return [StepResult]
-      def execute_step_with_retry(step, context)
-        agent_def = Loader.load_agent(step.agent)
-        resolved_input = Resolver.resolve_inputs(step.input, context)
-
-        max_attempts = step.retry_config ? step.retry_config[:max_attempts] : 1
-        backoff_ms = step.retry_config ? step.retry_config[:backoff_ms] : 0
-
-        last_error = nil
-        attempts = 0
-
-        max_attempts.times do |attempt_index|
-          attempts = attempt_index + 1
-          begin
-            @log.debug("step:attempt", { step: step.id, attempt: attempts, max: max_attempts })
-            result = Runner.execute_agent(resolved_input, agent_def, config_overrides: step.config)
-
-            return StepResult.new(
-              id:            step.id,
-              agent:         step.agent,
-              status:        "success",
-              output:        result[:output],
-              metrics:       result[:metrics],
-              attempts:      attempts,
-              used_fallback: false
-            )
-          rescue StandardError => e
-            last_error = e
-            @log.warn("step:error", { step: step.id, attempt: attempts, error: e.message })
-            if attempt_index < max_attempts - 1
-              sleep_seconds = (backoff_ms * (attempt_index + 1)) / 1000.0
-              sleep(sleep_seconds) if sleep_seconds > 0
+            if branch.workflow && !branch.workflow.empty?
+              ws = WorkflowStep.new(id: branch.id, workflow: branch.workflow, input: branch.input, config: branch.config)
+              execute_sub_workflow(ws, frozen_context)
+            else
+              execute_agent_step(branch.id, branch.agent, branch.input, branch.config,
+                                 branch.retry_config, branch.fallback, frozen_context)
             end
           end
         end
 
-        # All retries exhausted -- try fallback
-        if step.fallback
-          @log.info("step:fallback", { step: step.id, fallback_agent: step.fallback[:agent] })
-          begin
-            fallback_def = Loader.load_agent(step.fallback[:agent])
-            result = Runner.execute_agent(resolved_input, fallback_def, config_overrides: step.fallback[:config])
+        branch_results = Concurrent::Promises.zip(*futures).value!
+        branch_results = Array(branch_results)
 
-            return StepResult.new(
-              id:            step.id,
-              agent:         step.fallback[:agent],
-              status:        "success",
-              output:        result[:output],
-              metrics:       result[:metrics],
-              attempts:      attempts + 1,
-              used_fallback: true
-            )
-          rescue StandardError => e
-            @log.error("step:fallback_failed", { step: step.id, error: e.message })
-            last_error = e
+        has_error = false
+        branch_results.each do |sr|
+          results << sr
+          if sr.status == "success"
+            context["steps"][sr.id] = { "output" => sr.output }
+          else
+            has_error = true
           end
         end
 
-        # Complete failure
-        StepResult.new(
-          id:            step.id,
-          agent:         step.agent,
-          status:        "error",
-          output:        nil,
-          metrics:       StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0),
-          attempts:      attempts,
-          used_fallback: step.fallback ? true : false,
-          error:         last_error&.message || "Unknown error"
-        )
+        emit_trail(trail, pb.id, "parallel_end")
+
+        case pb.join
+        when "all"
+          raise OrchestrationError, "Parallel block '#{pb.id}': one or more branches failed (join=all)" if has_error
+        when "any"
+          unless branch_results.any? { |r| r.status == "success" }
+            raise OrchestrationError, "Parallel block '#{pb.id}': all branches failed (join=any)"
+          end
+        end
+        # all_settled: always continue
+
+        resolve_next_target(pb.next_field, nil)
       end
 
-      # Fill a skipped route block result when the workflow is short-circuited.
-      def fill_route_skipped(route_block, defaults, context, step_results)
-        default_output = defaults&.dig(route_block.id) || nil
-        @log.info("route:skipped", { route: route_block.id })
-        context["steps"][route_block.id] = { "output" => default_output }
-        step_results << StepResult.new(
-          id:      route_block.id,
-          agent:   "routing-agent:#{route_block.routing_agent}",
-          status:  "skipped",
-          output:  default_output,
-          metrics: StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0)
-        )
-      end
+      # ── Loop execution ──
 
-      # Execute a route block: decide → handle _none → dispatch target.
-      #
-      # @param route_block [RouteBlock]
-      # @param context [Hash]
-      # @return [StepResult]
-      def execute_route(route_block, context)
-        max_attempts = route_block.retry ? route_block.retry[:max_attempts] : 1
-        backoff_ms   = route_block.retry ? route_block.retry[:backoff_ms] : 0
+      def execute_loop_block(lb, context, results, trail)
+        last_result = nil
 
-        @log.info("route:start", {
-          route: route_block.id,
-          routing_agent: route_block.routing_agent,
-          route_keys: route_block.routes.keys,
-          max_attempts: max_attempts,
-          has_fallback: !!route_block.fallback
-        })
+        lb.max_iterations.times do |i|
+          iteration = i + 1
+          emit_trail(trail, lb.id, "loop_iteration", { iteration: iteration })
 
-        router_def     = Loader.load_routing_agent(route_block.routing_agent)
-        resolved_input = Resolver.resolve_inputs(route_block.input, context)
-        route_keys     = route_block.routes.keys.reject { |k| k == "_none" }
+          sr = if lb.workflow && !lb.workflow.empty?
+                 ws = WorkflowStep.new(id: lb.id, workflow: lb.workflow, input: lb.input, config: lb.config)
+                 execute_sub_workflow(ws, context)
+               else
+                 execute_agent_step(lb.id, lb.agent, lb.input, lb.config,
+                                    lb.retry_config, lb.fallback, context)
+               end
 
-        # ── Phase 1: Router decision with retry (+ optional fallback) ──
+          if sr.status == "success"
+            context["steps"][lb.id] = { "output" => sr.output }
+          else
+            results << sr
+            raise OrchestrationError, "Loop '#{lb.id}' iteration #{iteration} failed: #{sr.error}"
+          end
 
-        chosen_key    = nil
-        router_output = nil
-        used_fallback = false
-        total_attempts = 0
-        decided       = false
-        last_error    = nil
+          last_result = sr
 
-        max_attempts.times do |attempt_index|
-          total_attempts = attempt_index + 1
-          @log.info("route:decision_attempt", { route: route_block.id, attempt: total_attempts, max: max_attempts })
-
-          begin
-            output = execute_routing_agent_decision(router_def, resolved_input, route_keys)
-            key = output.is_a?(Hash) ? (output["route"] || output[:route]) : nil
-            key = key.to_s
-
-            @log.info("route:decision", { route: route_block.id, chosen: key, attempt: total_attempts })
-
-            if key != "_none" && !route_block.routes.key?(key)
-              raise OrchestrationError,
-                    "Routing agent \"#{route_block.routing_agent}\" returned invalid route key \"#{key}\". " \
-                    "Valid keys: #{(route_keys + ["_none"]).join(", ")}"
-            end
-
-            chosen_key    = key
-            router_output = output
-            decided       = true
-            break
-          rescue StandardError => e
-            last_error = e
-            @log.warn("route:decision_error", { route: route_block.id, attempt: total_attempts, error: e.message })
-            if attempt_index < max_attempts - 1
-              sleep_seconds = (backoff_ms * (attempt_index + 1)) / 1000.0
-              sleep(sleep_seconds) if sleep_seconds > 0
-            end
+          if lb.until_condition && !lb.until_condition.empty?
+            break if evaluate_condition(lb.until_condition, sr.output)
           end
         end
 
-        # Fallback routing agent decision
-        if !decided && route_block.fallback
-          @log.info("route:fallback_decision", { route: route_block.id, fallback_routing_agent: route_block.fallback[:routing_agent] })
-          begin
-            fallback_def = Loader.load_routing_agent(route_block.fallback[:routing_agent])
-            merged_fallback = route_block.fallback[:config] ? fallback_def.dup.tap { |d|
-              route_block.fallback[:config].each { |k, v| d[k.to_sym] = v rescue nil }
-            } : fallback_def
-            output = execute_routing_agent_decision(merged_fallback, resolved_input, route_keys)
-            key = output.is_a?(Hash) ? (output["route"] || output[:route]) : nil
-            key = key.to_s
+        results << last_result if last_result
 
-            if key != "_none" && !route_block.routes.key?(key)
-              raise OrchestrationError, "Fallback routing agent returned invalid key \"#{key}\""
-            end
-
-            chosen_key     = key
-            router_output  = output
-            used_fallback  = true
-            total_attempts += 1
-            decided        = true
-          rescue StandardError => e
-            last_error     = e
-            total_attempts += 1
-            @log.error("route:fallback_decision_error", { route: route_block.id, error: e.message })
-          end
-        end
-
-        unless decided
-          @log.error("route:decision_exhausted", { route: route_block.id, total_attempts: total_attempts })
-          return StepResult.new(
-            id:            route_block.id,
-            agent:         "routing-agent:#{route_block.routing_agent}",
-            status:        "error",
-            output:        nil,
-            metrics:       StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0),
-            attempts:      total_attempts,
-            used_fallback: !!route_block.fallback,
-            error:         last_error&.message || "Router decision failed"
-          )
-        end
-
-        resolved_agent = used_fallback ? "routing-agent:#{route_block.fallback[:routing_agent]}" : "routing-agent:#{route_block.routing_agent}"
-        target = route_block.routes[chosen_key]
-
-        # ── Phase 2: Handle _none → short_circuit ──
-
-        if chosen_key == "_none" || (target.is_a?(Hash) && target["short_circuit"])
-          route_out = RouteOutput.new(route: "_none", router_output: router_output, result: nil)
-          return StepResult.new(
-            id:            route_block.id,
-            agent:         resolved_agent,
-            status:        "short_circuited",
-            output:        route_out.to_h,
-            metrics:       StepMetrics.new(latency_ms: 0, input_tokens: 0, output_tokens: 0),
-            attempts:      total_attempts,
-            used_fallback: used_fallback
-          )
-        end
-
-        # ── Phase 3: Dispatch target (no retry) ──
-
-        dispatch_result = dispatch_route_target(target, resolved_input, route_block, context)
-        route_out = RouteOutput.new(route: chosen_key, router_output: router_output, result: dispatch_result[:output])
-
-        StepResult.new(
-          id:            route_block.id,
-          agent:         resolved_agent,
-          status:        "success",
-          output:        route_out.to_h,
-          metrics:       dispatch_result[:metrics],
-          attempts:      total_attempts,
-          used_fallback: used_fallback
-        )
+        resolve_next_target(lb.next_field, nil)
       end
 
-      # Execute the routing agent decision, returning a hash with a "route" key.
-      #
-      # @param router_def [RoutingAgentDefinition]
-      # @param resolved_input [Hash]
-      # @param route_keys [Array<String>]
-      # @return [Hash] e.g. { "route" => "sports" }
-      def execute_routing_agent_decision(router_def, resolved_input, route_keys)
-        if router_def.strategy == "deterministic"
-          agent_compat = AgentDefinition.new(
-            name:        router_def.name,
-            description: router_def.description,
-            type:        "deterministic",
-            handler:     router_def.handler
-          )
-          result = Runner.execute_agent(resolved_input, agent_compat)
-          result[:output]
+      # ── ForEach execution ──
+
+      def execute_for_each_block(feb, context, results, trail)
+        collection = Resolver.resolve_ref(feb.collection, context)
+        raise OrchestrationError, "for_each '#{feb.id}': collection did not resolve to an array" unless collection.is_a?(Array)
+
+        if collection.empty?
+          context["steps"][feb.id] = { "output" => [] }
+          results << StepResult.new(id: feb.id, agent: feb.agent, status: "success", output: [], metrics: ZERO_METRICS)
+          return resolve_next_target(feb.next_field, nil)
+        end
+
+        concurrency = feb.max_concurrency.to_i > 0 ? feb.max_concurrency : collection.length
+        iter_results = Array.new(collection.length)
+        iter_errors = Array.new(collection.length)
+
+        # Process in batches for concurrency control
+        collection.each_slice(concurrency).with_index do |batch, batch_idx|
+          futures = batch.each_with_index.map do |item, local_idx|
+            idx = batch_idx * concurrency + local_idx
+            Concurrent::Promises.future do
+              emit_trail(trail, feb.id, "for_each_iteration", { index: idx })
+              iter_ctx = deep_dup(context)
+              iter_ctx["steps"]["__current"] = { "output" => item }
+
+              sr = execute_agent_step(
+                "#{feb.id}[#{idx}]", feb.agent, feb.input, feb.config,
+                feb.retry_config, feb.fallback, iter_ctx
+              )
+
+              if sr.status == "success"
+                iter_results[idx] = sr.output
+              else
+                iter_errors[idx] = sr.error || "unknown"
+              end
+            end
+          end
+          Concurrent::Promises.zip(*futures).value!
+        end
+
+        has_error = iter_errors.any? { |e| !e.nil? }
+        has_success = iter_errors.any?(&:nil?)
+
+        fe_status = if has_error && has_success
+                      "partial_failure"
+                    elsif has_error
+                      "error"
+                    else
+                      "success"
+                    end
+
+        results << StepResult.new(id: feb.id, agent: feb.agent, status: fe_status, output: iter_results, metrics: ZERO_METRICS)
+        context["steps"][feb.id] = { "output" => iter_results }
+
+        if fe_status == "error"
+          first_err = iter_errors.compact.first
+          raise OrchestrationError, "for_each '#{feb.id}': #{first_err}"
+        end
+
+        resolve_next_target(feb.next_field, nil)
+      end
+
+      # ── Next resolution ──
+
+      def resolve_next_target(next_field, output)
+        return "" if next_field.nil?
+
+        if next_field.target && !next_field.target.empty?
+          return next_field.target
+        end
+
+        if next_field.switch
+          sn = next_field.switch
+          output_map = output.is_a?(Hash) ? output : {}
+          val = resolve_field_path(sn.expression, output_map)
+          val_str = val.nil? ? "" : val.to_s
+          return sn.cases[val_str] || sn.default || ""
+        end
+
+        if next_field.if_next
+          ifn = next_field.if_next
+          return evaluate_condition(ifn.condition, output) ? (ifn.then_target || "") : (ifn.else_target || "")
+        end
+
+        ""
+      end
+
+      # ── Condition evaluation ──
+
+      def evaluate_condition(condition, output)
+        output_map = output.is_a?(Hash) ? output : {}
+        condition = condition.strip
+
+        if condition.start_with?("!")
+          return !evaluate_positive(condition[1..].strip, output_map)
+        end
+
+        if condition.include?("==")
+          left, right = condition.split("==", 2).map(&:strip)
+          left_val = resolve_field_path(left, output_map)
+          right_val = right.gsub(/^["']|["']$/, "")
+          return left_val.to_s == right_val
+        end
+
+        if condition.include?(">=")
+          left, right = condition.split(">=", 2).map(&:strip)
+          left_val = resolve_field_path(left, output_map)
+          return to_float(left_val) >= to_float(right)
+        end
+
+        if condition.include?(">")
+          left, right = condition.split(">", 2).map(&:strip)
+          left_val = resolve_field_path(left, output_map)
+          return to_float(left_val) > to_float(right)
+        end
+
+        evaluate_positive(condition, output_map)
+      end
+
+      def evaluate_positive(expr, output_map)
+        val = resolve_field_path(expr, output_map)
+        truthy?(val)
+      end
+
+      def resolve_field_path(path, output_map)
+        path = path.sub(/^output\./, "")
+        current = output_map
+        path.split(".").each do |part|
+          return nil unless current.is_a?(Hash)
+          current = current[part] || current[part.to_sym]
+        end
+        current
+      end
+
+      def truthy?(val)
+        return false if val.nil?
+        return val if val.is_a?(TrueClass) || val.is_a?(FalseClass)
+        return val != "" if val.is_a?(String)
+        return val != 0 if val.is_a?(Numeric)
+        true
+      end
+
+      def to_float(v)
+        Float(v)
+      rescue ArgumentError, TypeError
+        0.0
+      end
+
+      # ── Helpers ──
+
+      def get_step_id(entry)
+        entry.respond_to?(:id) ? entry.id : nil
+      end
+
+      def emit_trail(trail, step_id, event, data = nil)
+        trail << TrailEntry.new(step_id: step_id, event: event, timestamp: Time.now.utc.iso8601, data: data)
+      end
+
+      def mark_not_executed(entry, results)
+        if entry.is_a?(ParallelBlock)
+          entry.branches.each do |b|
+            results << StepResult.new(id: b.id, agent: b.agent, status: "not_executed", output: nil, metrics: ZERO_METRICS)
+          end
         else
-          # LLM strategy
-          input_summary = resolved_input.map do |k, v|
-            "#{k}: #{v.is_a?(String) ? v : JSON.generate(v)}"
-          end.join("\n")
-
-          user_message =
-            "#{input_summary}\n\n" \
-            "You must choose exactly one of the following routes: #{route_keys.join(", ")}\n" \
-            "If none of the routes apply, choose: _none\n" \
-            "Respond with a JSON object: { \"route\": \"<chosen_key>\" }"
-
-          result = LLM.call_llm(
-            model:        router_def.model || "gpt-4.1-mini",
-            system_prompt: router_def.prompt || "",
-            user_content:  user_message,
-            temperature:   router_def.temperature || 0,
-            schema_name:   nil,
-            base_url:      router_def.base_url,
-            api_key_env:   router_def.api_key_env
-          )
-          result[:output]
+          results << StepResult.new(id: get_step_id(entry), agent: entry.respond_to?(:agent) ? entry.agent : nil,
+                                     status: "not_executed", output: nil, metrics: ZERO_METRICS)
         end
       end
 
-      # Dispatch to the chosen route target.
-      #
-      # @param target [String, Hash] the route target value from the routes map
-      # @param pass_through [Hash] resolved input from the route block
-      # @param route_block [RouteBlock]
-      # @param context [Hash]
-      # @return [Hash] { output:, metrics: }
-      def dispatch_route_target(target, pass_through, route_block, context)
-        if target.is_a?(String)
-          # String → agent ID with pass-through input
-          agent_def = Loader.load_agent(target)
-          Runner.execute_agent(pass_through, agent_def)
-
-        elsif target.is_a?(Hash) && target.key?("route")
-          # Nested route block
-          nested_block = Loader.build_route_block(target["route"])
-          nested_result = execute_route(nested_block, context)
-          {
-            output:  nested_result.output,
-            metrics: nested_result.metrics
-          }
-
-        elsif target.is_a?(Hash) && target.key?("agent")
-          # Agent with explicit or pass-through input
-          agent_def  = Loader.load_agent(target["agent"])
-          agent_input = target["input"] ? Resolver.resolve_inputs(target["input"], context) : pass_through
-          Runner.execute_agent(agent_input, agent_def)
-
-        elsif target.is_a?(Hash) && target.key?("workflow")
-          # Workflow target
-          wf_input = target["input"] ? Resolver.resolve_inputs(target["input"], context) : pass_through
-          envelope = orchestrate(target["workflow"], wf_input)
-          {
-            output:  envelope[:result],
-            metrics: {
-              latency_ms:    envelope.dig(:metrics, :total_latency_ms) || 0,
-              input_tokens:  envelope.dig(:metrics, :total_input_tokens) || 0,
-              output_tokens: envelope.dig(:metrics, :total_output_tokens) || 0
-            }
-          }
-
-        else
-          raise OrchestrationError, "Unknown route target type in route #{route_block.id}: #{target.inspect}"
+      def compute_total_metrics(step_results)
+        total = { total_latency_ms: 0, total_input_tokens: 0, total_output_tokens: 0 }
+        step_results.each do |sr|
+          m = sr.metrics
+          if m.is_a?(StepMetrics)
+            total[:total_latency_ms] += m.latency_ms
+            total[:total_input_tokens] += m.input_tokens
+            total[:total_output_tokens] += m.output_tokens
+          elsif m.is_a?(Hash)
+            total[:total_latency_ms] += (m[:latency_ms] || 0)
+            total[:total_input_tokens] += (m[:input_tokens] || 0)
+            total[:total_output_tokens] += (m[:output_tokens] || 0)
+          end
         end
+        total
       end
 
-      # Evaluate a short-circuit condition string.
-      # The condition is a Ruby expression with +output+ in scope.
-      #
-      # @param condition [String] e.g. "!output['found']" or "!output.is_food"
-      # @param output [Object] the step output
-      # @return [Boolean]
-      def evaluate_short_circuit(condition, output)
-        # Normalize JS-style property access to Ruby hash access:
-        #   !output.found  =>  !output["found"]
-        #   output.status == "fail"  =>  output["status"] == "fail"
-        normalized = condition.gsub(/output\.(\w+)/) do
-          "output[\"#{::Regexp.last_match(1)}\"]"
-        end
-
-        # rubocop:disable Security/Eval
-        binding_context = binding
-        binding_context.local_variable_set(:output, output)
-        result = eval(normalized, binding_context) # rubocop:disable Lint/Eval
-        # rubocop:enable Security/Eval
-
-        @log.debug("short_circuit:eval", { condition: condition, normalized: normalized, result: result })
-        !!result
-      rescue StandardError => e
-        @log.warn("short_circuit:eval_error", { condition: condition, error: e.message })
-        false
-      end
-
-      def accumulate_metrics!(total, step_result)
-        m = step_result.metrics
-        if m.is_a?(StepMetrics)
-          total[:total_latency_ms] += m.latency_ms
-          total[:total_input_tokens] += m.input_tokens
-          total[:total_output_tokens] += m.output_tokens
-        elsif m.is_a?(Hash)
-          total[:total_latency_ms] += (m[:latency_ms] || m["latency_ms"] || 0)
-          total[:total_input_tokens] += (m[:input_tokens] || m["input_tokens"] || 0)
-          total[:total_output_tokens] += (m[:output_tokens] || m["output_tokens"] || 0)
-        end
-
-        if step_result.status == "skipped"
-          total[:steps_skipped] += 1
-        else
-          total[:steps_executed] += 1
-        end
-      end
-
-      # Deep-duplicate a hash/array structure (cheap snapshot for parallel).
       def deep_dup(obj)
         case obj
         when Hash
@@ -536,7 +517,6 @@ module AgenticEngine
         end
       end
 
-      # Recursively convert symbol keys to string keys.
       def stringify_keys(obj)
         case obj
         when Hash

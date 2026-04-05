@@ -12,12 +12,10 @@ steps:
     agent: product-fetcher
     input:
       product_id: $.input.product_id
-    short_circuit:
-      condition: "!output.found"
-      defaults:
-        review_analysis: { sentiment: "unknown", pros: [], cons: [], themes: [], quality_rating: 0 }
-        article: { title: "Product Not Found", overview: "The requested product could not be found.", pros_cons: "", comparison: "", verdict: "N/A", rating: 0 }
-        quality: { structure_score: 0, completeness_score: 0, tone_score: 0, overall: 0 }
+    next:
+      if: output.found
+      then: review_analysis
+      else: _end
 
   - id: review_analysis
     agent: review-analyzer

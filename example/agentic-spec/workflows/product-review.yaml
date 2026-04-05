@@ -13,47 +13,47 @@ steps:
     agent: product-fetcher
     input:
       product_id: $.input.product_id
-    short_circuit:
-      condition: "!output.found"
-      defaults:
-        review_analysis: { sentiment: "unknown", pros: [], cons: [], themes: [], quality_rating: 0 }
-        comparison: { alternatives: [], recommendation: "N/A" }
-        article: { title: "Product Not Found", overview: "The requested product could not be found.", pros_cons: "", comparison: "", verdict: "N/A", rating: 0 }
-        quality: { structure_score: 0, completeness_score: 0, tone_score: 0, overall: 0 }
+    next:
+      if: output.found
+      then: research
+      else: _end
 
   # Step 2: Analyze reviews + Research alternatives (parallel)
   - parallel:
-    - id: review_analysis
-      agent: review-analyzer
-      input:
-        product_name: $.steps.fetch.output.title
-        category: $.steps.fetch.output.category
-        price: $.steps.fetch.output.price
-        rating: $.steps.fetch.output.rating
-        reviews_text: $.steps.fetch.output.reviews_text
-      retry:
-        max_attempts: 2
-        backoff_ms: 500
-      fallback:
-        agent: review-analyzer
-        config:
-          model: gpt-4.1-mini
+      id: research
+      join: all
+      branches:
+        - id: review_analysis
+          agent: review-analyzer
+          input:
+            product_name: $.steps.fetch.output.title
+            category: $.steps.fetch.output.category
+            price: $.steps.fetch.output.price
+            rating: $.steps.fetch.output.rating
+            reviews_text: $.steps.fetch.output.reviews_text
+          retry:
+            max_attempts: 2
+            backoff_ms: 500
+          fallback:
+            agent: review-analyzer
+            config:
+              model: gpt-4.1-mini
 
-    - id: comparison
-      agent: comparison-researcher
-      input:
-        product_name: $.steps.fetch.output.title
-        category: $.steps.fetch.output.category
-        price: $.steps.fetch.output.price
-        brand: $.steps.fetch.output.brand
-        description: $.steps.fetch.output.description
-      retry:
-        max_attempts: 2
-        backoff_ms: 500
-      fallback:
-        agent: comparison-researcher
-        config:
-          model: gpt-4.1-mini
+        - id: comparison
+          agent: comparison-researcher
+          input:
+            product_name: $.steps.fetch.output.title
+            category: $.steps.fetch.output.category
+            price: $.steps.fetch.output.price
+            brand: $.steps.fetch.output.brand
+            description: $.steps.fetch.output.description
+          retry:
+            max_attempts: 2
+            backoff_ms: 500
+          fallback:
+            agent: comparison-researcher
+            config:
+              model: gpt-4.1-mini
 
   # Step 3: Write the review article
   - id: article

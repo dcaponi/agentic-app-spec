@@ -1,0 +1,11 @@
+name: Food Subtype Classifier
+description: Classifies a food item into meat, vegetable, or canned
+type: llm
+model: gpt-4.1-mini
+temperature: 0
+schema: food_subtype_classification
+user_message: "Classify this food item into a subtype.\n\nItem: {{item_name}}"
+input:
+  item_name:
+    type: string
+    required: true

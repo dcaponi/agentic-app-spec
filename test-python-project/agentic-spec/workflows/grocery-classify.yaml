@@ -1,6 +1,6 @@
 name: grocery-classify
 version: "1.0"
-description: Classifies grocery items through a hierarchical routing tree
+description: Classifies grocery items through hierarchical switch branching
 
 input:
   item_name:
@@ -8,29 +8,60 @@ input:
     required: true
 
 steps:
-  - route:
-      id: classify
-      routing_agent: food-router
-      input:
-        item_name: $.input.item_name
-      routes:
-        food:
-          route:
-            id: food_sub
-            routing_agent: food-subtype-router
-            input:
-              item_name: $.input.item_name
-            routes:
-              meat: classify-meat
-              vegetable: classify-vegetable
-              canned: classify-canned
-              _none:
-                short_circuit: true
-                defaults: {}
-        non_food: classify-non-food
-        _none:
-          short_circuit: true
-          defaults: {}
+  - id: classify
+    agent: food-classifier
+    input:
+      item_name: $.input.item_name
+    next:
+      switch: output.category
+      cases:
+        food: classify-subtype
+        non_food: handle-non-food
+      default: _end
+
+  - id: classify-subtype
+    agent: food-subtype-classifier
+    input:
+      item_name: $.input.item_name
+    next:
+      switch: output.subtype
+      cases:
+        meat: handle-meat
+        vegetable: handle-vegetable
+        canned: handle-canned
+        other: handle-other-food
+      default: _end
+
+  - id: handle-meat
+    agent: classify-meat
+    input:
+      item_name: $.input.item_name
+    next: _end
+
+  - id: handle-vegetable
+    agent: classify-vegetable
+    input:
+      item_name: $.input.item_name
+    next: _end
+
+  - id: handle-canned
+    agent: classify-canned
+    input:
+      item_name: $.input.item_name
+    next: _end
+
+  - id: handle-other-food
+    agent: classify-food
+    input:
+      item_name: $.input.item_name
+    next: _end
+
+  - id: handle-non-food
+    agent: classify-non-food
+    input:
+      item_name: $.input.item_name
 
 output:
-  classification: $.steps.classify.output
+  category: $.steps.classify.output
+  subtype: $.steps.classify-subtype.output
+  detail: $.steps.handle-meat.output

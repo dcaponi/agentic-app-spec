@@ -30,6 +30,8 @@ enum Commands {
     },
     /// List all discovered agents and workflows
     List,
+    /// Validate workflow YAML files (graph structure, targets, config whitelist)
+    Validate,
 }
 
 #[derive(Subcommand)]
@@ -88,5 +90,6 @@ fn main() {
             commands::build::run(lang.as_deref(), outdir.as_deref());
         }
         Commands::List => commands::list::run(),
+        Commands::Validate => commands::validate::run(),
     }
 }

@@ -16,38 +16,118 @@ class RetryConfig:
 
 @dataclass
 class FallbackConfig:
-    """Configuration for step fallback agent."""
+    """Configuration for step fallback agent or workflow."""
 
     agent: str = ""
+    workflow: str = ""
     config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class ShortCircuit:
-    """Early-exit condition that skips remaining steps when true."""
+class SwitchNext:
+    """Value-based branching: dispatch on an expression."""
+
+    expression: str = ""
+    cases: dict[str, str] = field(default_factory=dict)
+    default: str = ""
+
+
+@dataclass
+class IfNext:
+    """Binary branching: evaluate a condition."""
 
     condition: str = ""
-    defaults: dict[str, Any] = field(default_factory=dict)
+    then: str = ""
+    else_: str = ""
+
+
+@dataclass
+class NextField:
+    """Control flow field — exactly one of target, switch, or if_ is set."""
+
+    target: str = ""
+    switch: SwitchNext | None = None
+    if_: IfNext | None = None
 
 
 @dataclass
 class WorkflowStep:
-    """A single step within a workflow."""
+    """A single step within a workflow (agent or sub-workflow invocation)."""
 
     id: str = ""
     agent: str = ""
+    workflow: str = ""
     input: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
     retry: RetryConfig | None = None
     fallback: FallbackConfig | None = None
-    short_circuit: ShortCircuit | None = None
+    requires: list[str] = field(default_factory=list)
+    next: NextField | None = None
 
 
 @dataclass
-class ParallelGroup:
-    """A group of steps that execute concurrently."""
+class ParallelBranch:
+    """A single branch within a parallel block."""
 
-    parallel: list[WorkflowStep] = field(default_factory=list)
+    id: str = ""
+    agent: str = ""
+    workflow: str = ""
+    input: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    retry: RetryConfig | None = None
+    fallback: FallbackConfig | None = None
+
+
+@dataclass
+class ParallelBlock:
+    """A set of branches that run concurrently."""
+
+    id: str = ""
+    join: str = "all"  # "all", "any", "all_settled"
+    branches: list[ParallelBranch] = field(default_factory=list)
+    next: NextField | None = None
+
+
+@dataclass
+class LoopBlock:
+    """Bounded iteration step."""
+
+    id: str = ""
+    agent: str = ""
+    workflow: str = ""
+    input: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    until: str = ""
+    max_iterations: int = 1
+    retry: RetryConfig | None = None
+    fallback: FallbackConfig | None = None
+    next: NextField | None = None
+
+
+@dataclass
+class ForEachBlock:
+    """Dynamic fan-out over a runtime array."""
+
+    id: str = ""
+    agent: str = ""
+    workflow: str = ""
+    input: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    collection: str = ""
+    max_concurrency: int = 0
+    retry: RetryConfig | None = None
+    fallback: FallbackConfig | None = None
+    next: NextField | None = None
+
+
+@dataclass
+class TrailEntry:
+    """A single event in the workflow execution trail."""
+
+    step_id: str = ""
+    event: str = ""
+    timestamp: str = ""
+    data: Any = None
 
 
 @dataclass
@@ -58,7 +138,7 @@ class WorkflowDefinition:
     description: str = ""
     version: str = ""
     input: dict[str, Any] = field(default_factory=dict)
-    steps: list[WorkflowStep | ParallelGroup | RouteEntry] = field(default_factory=list)
+    steps: list[WorkflowStep | ParallelBlock | LoopBlock | ForEachBlock] = field(default_factory=list)
     output: dict[str, str] = field(default_factory=dict)
 
 
@@ -83,50 +163,6 @@ class AgentDefinition:
 
 
 @dataclass
-class RoutingAgentDefinition:
-    """Parsed routing-agent YAML definition."""
-
-    name: str = ""
-    description: str = ""
-    strategy: str = "llm"  # "llm" or "deterministic"
-    model: str = ""
-    temperature: float = 0.0
-    handler: str = ""
-    prompt: str = ""
-    input: dict[str, Any] | None = None
-    base_url: str = ""
-    api_key_env: str = ""
-
-
-@dataclass
-class RouteBlock:
-    """A single routing step within a workflow."""
-
-    id: str = ""
-    routing_agent: str = ""
-    input: dict[str, str] = field(default_factory=dict)
-    routes: dict[str, Any] = field(default_factory=dict)  # values are str | dict with agent/workflow/route/_none
-    retry: RetryConfig | None = None
-    fallback: dict[str, Any] | None = None  # {"routing_agent": str, "config": dict}
-
-
-@dataclass
-class RouteEntry:
-    """Wrapper that marks a workflow step as a route block."""
-
-    route: RouteBlock = field(default_factory=RouteBlock)
-
-
-@dataclass
-class RouteOutput:
-    """Output produced by a completed route execution."""
-
-    route: str = ""
-    router_output: dict[str, Any] = field(default_factory=dict)
-    result: Any = None
-
-
-@dataclass
 class StepMetrics:
     """Timing and token metrics for a single step or LLM call."""
 
@@ -142,10 +178,14 @@ class StepResult:
 
     step_id: str = ""
     agent: str = ""
+    workflow: str = ""
+    status: str = "success"  # "success", "error", "not_executed", "partial_failure"
     output: Any = None
     metrics: StepMetrics = field(default_factory=StepMetrics)
-    retries: int = 0
+    attempts: int = 0
     used_fallback: bool = False
+    fallback_reason: str = ""
+    sub_envelope: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -165,20 +205,16 @@ class ExecutionContext:
     steps: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-@dataclass
-class WorkflowEnvelope:
-    """Top-level envelope wrapping a complete workflow execution result."""
+class WorkflowError(Exception):
+    """Wraps a workflow failure with the partial envelope (including trail)."""
 
-    request_id: str = ""
-    workflow: str = ""
-    version: str = ""
-    status: str = "success"  # "success" or "error"
-    output: dict[str, Any] = field(default_factory=dict)
-    steps: list[dict[str, Any]] = field(default_factory=list)
-    metrics: dict[str, Any] = field(default_factory=dict)
-    started_at: str = ""
-    completed_at: str = ""
-    error: str | None = None
+    def __init__(self, message: str, envelope: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.envelope = envelope
+
+
+# Type alias for the envelope dict returned by orchestrate().
+WorkflowEnvelope = dict[str, Any]
 
 
 def to_dict(obj: Any) -> Any:

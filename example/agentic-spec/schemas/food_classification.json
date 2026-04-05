@@ -1,0 +1,15 @@
+{
+  "name": "food_classification",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "category": {
+        "type": "string",
+        "enum": ["food", "non_food"]
+      }
+    },
+    "required": ["category"],
+    "additionalProperties": false
+  }
+}
