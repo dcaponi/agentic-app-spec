@@ -167,6 +167,8 @@ async function executeLLMAgent(
 			schemaName: agentDef.schema,
 			base_url: agentDef.base_url,
 			api_key_env: agentDef.api_key_env,
+			maxTokens: agentDef.max_tokens,
+			effort: agentDef.effort,
 		});
 		log.info(`LLM agent complete: ${agentDef.name}`, {
 			latency_ms: Math.round(result.metrics.latency_ms),

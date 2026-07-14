@@ -38,6 +38,26 @@ function isZodSchema(schema: unknown): schema is z.ZodType {
 	);
 }
 
+/** Resolve a registered schema name to a plain JSON Schema object, or null. */
+function resolveJsonSchema(schemaName?: string | null): Record<string, unknown> | null {
+	if (!schemaName) return null;
+	const schema = schemaRegistry.get(schemaName);
+	if (!schema) return null;
+	return isZodSchema(schema)
+		? (zodResponseFormat(schema, schemaName).json_schema.schema as Record<string, unknown>)
+		: (schema as unknown as Record<string, unknown>);
+}
+
+/**
+ * Per-model Anthropic capabilities. Newer Claude models reject an explicit
+ * `temperature` and support adaptive thinking (with a reasoning `effort`).
+ */
+function modelCapabilities(model: string): { acceptsTemperature: boolean; adaptiveThinking: boolean } {
+	const rejectsTemperature = /claude-(opus-4-[78]|sonnet-5|fable-5|mythos-5)/.test(model);
+	const adaptiveThinking = /claude-(opus-4-[678]|sonnet-5|sonnet-4-6|fable-5|mythos-5)/.test(model);
+	return { acceptsTemperature: !rejectsTemperature, adaptiveThinking };
+}
+
 // ── Clients (lazily initialised) ──
 
 let openaiClient: OpenAI | null = null;
@@ -89,6 +109,10 @@ export interface LLMCallOptions {
 	schemaName?: string | null;
 	base_url?: string;
 	api_key_env?: string;
+	/** Max output tokens. Defaults per provider when omitted. */
+	maxTokens?: number;
+	/** Reasoning effort for Anthropic adaptive-thinking models. */
+	effort?: 'low' | 'medium' | 'high';
 }
 
 export interface LLMResult {
@@ -180,6 +204,7 @@ async function callOpenAIWithZodSchema(
 			messages,
 			response_format: zodResponseFormat(schema, options.schemaName!),
 			temperature: options.temperature,
+			...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
 		});
 
 		const latency_ms = performance.now() - start;
@@ -254,6 +279,7 @@ async function callOpenAIWithJsonSchema(
 				},
 			},
 			temperature: options.temperature,
+			...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
 		});
 
 		const latency_ms = performance.now() - start;
@@ -315,6 +341,7 @@ async function callOpenAIJsonMode(
 			messages,
 			response_format: { type: 'json_object' },
 			temperature: options.temperature,
+			...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
 		});
 
 		const latency_ms = performance.now() - start;
@@ -437,19 +464,42 @@ async function callAnthropic(options: LLMCallOptions): Promise<LLMResult> {
 	const client = getAnthropicClient();
 	const start = performance.now();
 
-	const systemPrompt = buildAnthropicSystemPrompt(options.systemPrompt, options.schemaName);
+	const caps = modelCapabilities(options.model);
+	const jsonSchema = resolveJsonSchema(options.schemaName);
 	const userContent = toAnthropicUserContent(options.userContent);
 
+	// With a schema, use native structured output (`output_config`) so the model
+	// can only emit schema-valid JSON. Without one, fall back to a prompt that
+	// asks for a bare JSON object.
+	const outputConfig: Record<string, unknown> | undefined = jsonSchema
+		? { format: { type: 'json_schema', schema: jsonSchema } }
+		: undefined;
+	const systemPrompt = jsonSchema
+		? options.systemPrompt
+		: buildAnthropicSystemPrompt(options.systemPrompt, options.schemaName);
+
+	const body: Record<string, unknown> = {
+		model: options.model,
+		max_tokens: options.maxTokens ?? 4096,
+		system: systemPrompt,
+		messages: [{ role: 'user', content: userContent }],
+	};
+	if (outputConfig) body.output_config = outputConfig;
+	if (caps.adaptiveThinking) {
+		body.thinking = { type: 'adaptive' };
+		if (outputConfig && options.effort) outputConfig.effort = options.effort;
+	}
+	if (caps.acceptsTemperature) body.temperature = options.temperature;
+
 	try {
-		const response = await client.messages.create({
-			model: options.model,
-			max_tokens: 4096,
-			system: systemPrompt,
-			messages: [{ role: 'user', content: userContent }],
-			temperature: options.temperature,
-		});
+		// Stream: required by the SDK for high max_tokens; also avoids timeouts.
+		const response = await client.messages.stream(body as never).finalMessage();
 
 		const latency_ms = performance.now() - start;
+
+		if (response.stop_reason === 'refusal') {
+			throw new Error(`Model refused request (${options.schemaName ?? 'no schema'}).`);
+		}
 
 		// Extract text from content blocks
 		const textBlock = response.content.find(
