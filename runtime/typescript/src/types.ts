@@ -20,6 +20,8 @@ export interface StepResult {
 	status: 'success' | 'error' | 'not_executed' | 'partial_failure';
 	output: unknown;
 	metrics: StepMetrics;
+	/** Model used for this step (LLM agents only). */
+	model?: string;
 	attempts?: number;
 	used_fallback?: boolean;
 	fallback_reason?: string;
@@ -59,6 +61,8 @@ export class WorkflowError extends Error {
 export interface AgentResult<T = unknown> {
 	output: T;
 	metrics: StepMetrics;
+	/** Model actually used (LLM agents only). Enables per-model cost breakdowns. */
+	model?: string;
 }
 
 export interface WorkflowSummary {

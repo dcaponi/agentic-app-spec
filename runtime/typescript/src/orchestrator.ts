@@ -212,6 +212,7 @@ async function executeAgentStep(
 				status: 'success',
 				output: result.output,
 				metrics: result.metrics,
+				model: result.model,
 				attempts: attempt,
 			};
 		} catch (err) {
@@ -236,6 +237,7 @@ async function executeAgentStep(
 				status: 'success',
 				output: result.output,
 				metrics: result.metrics,
+				model: result.model,
 				attempts: maxAttempts,
 				used_fallback: true,
 				fallback_reason: serializeError(lastError).message,

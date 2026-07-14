@@ -30,11 +30,13 @@ export function getRegisteredHandlers(): string[] {
 /** Invoke a single agent by ID with the given input. */
 export async function invokeAgent(
 	agentId: string,
-	input: Record<string, unknown>
+	input: Record<string, unknown>,
+	options: { model?: string } = {}
 ): Promise<AgentResult> {
-	log.info(`invokeAgent: ${agentId}`, { input_keys: Object.keys(input) });
+	log.info(`invokeAgent: ${agentId}`, { input_keys: Object.keys(input), model_override: options.model });
 	const agentDef = loadAgent(agentId);
-	return executeAgent(input, agentDef);
+	const merged = options.model ? { ...agentDef, model: options.model } : agentDef;
+	return executeAgent(input, merged);
 }
 
 // ── Core executor ──
@@ -174,7 +176,7 @@ async function executeLLMAgent(
 			latency_ms: Math.round(result.metrics.latency_ms),
 			tokens: { input: result.metrics.input_tokens, output: result.metrics.output_tokens },
 		});
-		return result;
+		return { ...result, model };
 	} catch (err) {
 		log.error(`LLM agent failed: ${agentDef.name}`, {
 			model,
