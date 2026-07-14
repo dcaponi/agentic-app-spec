@@ -59,6 +59,10 @@ export interface AgentDefinition {
 	provider?: 'openai' | 'anthropic';
 	model?: string;
 	temperature?: number;
+	/** Max output tokens. Large values (e.g. 32000) need a capable model. */
+	max_tokens?: number;
+	/** Reasoning effort for Anthropic adaptive-thinking models. */
+	effort?: 'low' | 'medium' | 'high';
 	input_type?: 'image' | 'text';
 	image_detail?: 'low' | 'high';
 	schema?: string | null;

@@ -166,6 +166,8 @@ async function executeLLMAgent(
 			temperature,
 			schemaName: agentDef.schema,
 			provider: agentDef.provider,
+			maxTokens: agentDef.max_tokens,
+			effort: agentDef.effort,
 		});
 		log.info(`LLM agent complete: ${agentDef.name}`, {
 			latency_ms: Math.round(result.metrics.latency_ms),
