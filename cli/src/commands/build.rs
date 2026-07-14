@@ -113,10 +113,10 @@ fn gen_ts_agent(a: &AgentMeta) -> String {
 
     format!(
         "// @generated from {} — do not edit\n\
-         import {{ invokeAgent }} from '../../engine/runner.js';\n\
-         import type {{ AgentResult }} from '../../types.js';\n\
+         import {{ invokeAgent }} from 'agentic-app-engine';\n\
+         import type {{ AgentResult }} from 'agentic-app-engine';\n\
          \n\
-         export interface {}Input {{\n\
+         export type {}Input = {{\n\
          {}\n\
          }}\n\
          \n\
@@ -139,10 +139,10 @@ fn gen_ts_workflow(w: &WorkflowMeta) -> String {
 
     format!(
         "// @generated from {} — do not edit\n\
-         import {{ orchestrate }} from '../../engine/orchestrator.js';\n\
-         import type {{ WorkflowEnvelope }} from '../../types.js';\n\
+         import {{ orchestrate }} from 'agentic-app-engine';\n\
+         import type {{ WorkflowEnvelope }} from 'agentic-app-engine';\n\
          \n\
-         export interface {}Input {{\n\
+         export type {}Input = {{\n\
          {}\n\
          }}\n\
          \n\
